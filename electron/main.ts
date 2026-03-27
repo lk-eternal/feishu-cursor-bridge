@@ -14,6 +14,7 @@ import {
   initDaemonManager,
   cleanupDaemonManager,
 } from "./daemon-manager"
+import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 
 let mainWindow: BrowserWindow | null = null
@@ -79,6 +80,7 @@ function registerIpcHandlers(): void {
     return result.canceled ? null : result.filePaths[0]
   })
 
+  ipcMain.handle("workspace:inject", () => injectWorkspace())
   ipcMain.handle("daemon:start", () => startDaemon())
   ipcMain.handle("daemon:stop", () => stopDaemon())
   ipcMain.handle("daemon:status", () => getDaemonStatus())

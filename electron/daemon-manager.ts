@@ -396,6 +396,15 @@ function refreshPath(): void {
       ).trim()
       if (freshPath) process.env.PATH = freshPath
     } catch { /* ignore */ }
+  } else {
+    try {
+      const shell = process.env.SHELL || "/bin/zsh"
+      const freshPath = execSync(`${shell} -ilc 'echo $PATH'`, {
+        encoding: "utf-8",
+        timeout: 5000,
+      }).trim()
+      if (freshPath) process.env.PATH = freshPath
+    } catch { /* ignore */ }
   }
 }
 

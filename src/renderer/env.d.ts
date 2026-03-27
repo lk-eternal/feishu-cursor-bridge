@@ -36,7 +36,7 @@ interface ElectronAPI {
   getConfig(): Promise<AppConfig>
   saveConfig(config: Partial<AppConfig>): Promise<void>
   selectDirectory(): Promise<string | null>
-  injectWorkspace(): Promise<{ mcpOk: boolean; ruleOk: boolean }>
+  injectWorkspace(): Promise<{ results: { file: string; action: string; message: string }[] }>
   startDaemon(): Promise<{ ok: boolean; error?: string }>
   stopDaemon(): Promise<void>
   launchAgent(): Promise<{ ok: boolean; error?: string }>
