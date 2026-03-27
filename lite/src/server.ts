@@ -404,7 +404,10 @@ function startLarkConnection(): void {
         log("INFO", `收到[${messageType}]: "${text?.slice(0, 80)}" (id=${messageId})`);
 
         const senderOpenId = sender?.sender_id?.open_id;
-        if (senderOpenId && !resolvedTarget) { autoOpenId = senderOpenId; }
+        if (senderOpenId && !resolvedTarget) {
+          autoOpenId = senderOpenId;
+          log("INFO", `自动识别用户 open_id: ${senderOpenId}（可保存到 LARK_RECEIVE_ID 配置中）`);
+        }
 
         if (messageType === "image" || messageType === "post") {
           processIncomingMessage(messageId, messageType, rawContent)
@@ -459,7 +462,7 @@ async function pollReply(timeoutMs: number): Promise<string | null> {
 
 // ── MCP Server ──────────────────────────────────────────
 
-const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.2.5", description: "飞书消息桥接 – 通过飞书与用户沟通" });
+const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.2.7", description: "飞书消息桥接 – 通过飞书与用户沟通" });
 
 mcpServer.tool(
   "sync_message",
@@ -526,7 +529,7 @@ export async function main(): Promise<void> {
   writePidFile();
 
   log("INFO", "════════════════════════════════════════════════");
-  log("INFO", `feishu-cursor-bridge MCP v2.2.6 启动 (PID=${process.pid})`);
+  log("INFO", `feishu-cursor-bridge MCP v2.2.7 启动 (PID=${process.pid})`);
   log("INFO", `workspaceDirs: ${JSON.stringify(workspaceDirs)}`);
   log("INFO", "════════════════════════════════════════════════");
 
