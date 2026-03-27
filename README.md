@@ -1,33 +1,76 @@
-# lark-bridge-mcp
+# Feishu Cursor Bridge
 
-飞书/Lark MCP Server —— 让 AI 编程工具（Cursor、Claude Desktop 等）通过飞书机器人与你实时沟通。
+飞书 × Cursor 远程协作桌面应用 —— 让 AI 编程助手通过飞书与你实时沟通，人不在电脑旁也能远程协作。
 
-你不在电脑旁时，AI 可以通过飞书给你发消息、等你回复后继续工作。
+## 为什么需要它？
 
-## 功能
+当你使用 Cursor 编程时，AI Agent 经常需要你确认方案或回答问题。如果你不在电脑旁，Agent 只能干等。
 
-| 工具 | 说明 |
+**Feishu Cursor Bridge** 解决了这个问题：
+
+- AI 的提问会通过飞书机器人发到你手机上
+- 你在飞书回复后，AI 自动继续工作
+- 即使 Cursor 会话断开，守护进程也能自动重连
+- 支持定时任务，让 AI 按计划执行工作
+
+## 功能特性
+
+| 功能 | 说明 |
 |------|------|
-| `ask_user` | 通过飞书向用户提问并等待回复。支持轮询模式：prompt 为空时仅检查新回复，不发送消息 |
-| `send_message` | 通过飞书机器人发送通知（不等待回复） |
+| 可视化配置 | 首次使用向导 + 设置页面，无需手写配置文件 |
+| 一键启停 | 控制台一键管理守护进程生命周期 |
+| 消息桥接 | AI 通过飞书发消息、发图片、发文件，你在飞书回复 |
+| 自动重连 | Agent 断开后，收到飞书消息自动拉起新会话 |
+| 定时任务 | Cron 表达式调度，定时给 AI 下达指令 |
+| 系统托盘 | 关闭窗口自动最小化到托盘，后台持续运行 |
+| 工作区注入 | 自动写入 `.cursor/mcp.json` 和 Cursor Rules |
+| 实时日志 | Dashboard 实时查看运行日志和消息队列 |
+
+## 架构
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Electron 桌面应用                                          │
+│  · 配置向导 / 控制台 / 设置（React + Tailwind）              │
+│  · 管理 Daemon 生命周期、Cron 调度                           │
+│  · 自动注入 .cursor/mcp.json 和 Rules                       │
+└──────────────┬──────────────────────────────┬──────────────┘
+               │ spawn                        │ 写入工作区
+               ▼                              ▼
+┌──────────────────────────┐    ┌─────────────────────────────┐
+│  Daemon 守护进程          │    │  .cursor/                    │
+│  · 飞书 WebSocket 长连接  │    │  ├── mcp.json → lite MCP     │
+│  · 本机 HTTP API          │    │  └── rules/                  │
+│  · 消息队列               │    │      └── feishu-cursor-...   │
+│  · 看门狗（自动拉起Agent）│    └──────────────┬──────────────┘
+└──────────────┬───────────┘                   │ stdio
+               │ HTTP 127.0.0.1                ▼
+               │                  ┌─────────────────────────────┐
+               └─────────────────►│  Lite MCP Server             │
+                                  │  · sync_message（收发消息）   │
+                                  │  · send_image（发送图片）     │
+                                  │  · send_file（发送文件）      │
+                                  │  Cursor 子进程，stdio 通信    │
+                                  └─────────────────────────────┘
+```
 
 ## 安装
 
-```bash
-npm install -g lark-bridge-mcp
-```
+### 桌面版（推荐）
 
-或直接通过 npx 使用（推荐）：
+从 [Releases](../../releases) 页面下载对应平台的安装包：
 
-```bash
-npx lark-bridge-mcp
-```
+| 平台 | 格式 |
+|------|------|
+| Windows | `.exe` 安装包 / 免安装目录 |
+| macOS (Intel) | `.dmg` |
+| macOS (Apple Silicon) | `.dmg` |
 
-## 快速开始
+启动后按向导完成配置即可，无需手动编辑任何文件。
 
-### 方式一：零配置（推荐新手）
+### Lite 版（纯 MCP，无 GUI）
 
-只需要 APP_ID 和 APP_SECRET，首次使用时在飞书私聊机器人发一条消息即可自动识别身份：
+如果不需要桌面界面，可以直接在 Cursor 中配置 MCP Server：
 
 ```json
 {
@@ -44,11 +87,58 @@ npx lark-bridge-mcp
 }
 ```
 
-启动后在飞书找到你的机器人，私聊发一条消息。程序会自动记录你的 `open_id`，日志中会打印出来，可以保存下来用于方式二。
+> Lite 版首次使用需要在飞书私聊机器人发一条消息以自动识别身份。
 
-### 方式二：固定用户（推荐日常使用）
+## MCP 工具
 
-用从方式一获取到的 `open_id` 固定配置，重启后无需再发消息激活：
+桌面版和 Lite 版提供相同的 MCP 工具集：
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `sync_message` | `message?`, `timeout_seconds?` | 发送消息到飞书 / 等待用户回复，或两者组合 |
+| `send_image` | `path` | 发送本地图片到飞书 |
+| `send_file` | `path` | 发送本地文件到飞书 |
+
+**`sync_message` 用法示例：**
+
+```
+sync_message(message="方案A还是B？", timeout_seconds=60)  → 发消息并等待回复
+sync_message(timeout_seconds=60)                          → 仅轮询等待回复
+sync_message(message="任务完成！")                          → 仅发送通知
+```
+
+## 快速开始
+
+### 桌面版
+
+1. 下载安装并启动应用
+2. 按照向导填入飞书 App ID / App Secret
+3. 配置消息接收者（支持自动识别、open_id、邮箱、手机号）
+4. 选择 Cursor 工作目录，应用会自动注入 MCP 配置和 Rules
+5. 在 Dashboard 启动 Daemon，开始使用
+
+### Lite 版
+
+#### 方式一：零配置（推荐新手）
+
+只需 App ID 和 App Secret，首次在飞书私聊机器人发一条消息即可自动识别身份：
+
+```json
+{
+  "mcpServers": {
+    "lark-bridge": {
+      "command": "npx",
+      "args": ["-y", "lark-bridge-mcp"],
+      "env": {
+        "LARK_APP_ID": "你的 App ID",
+        "LARK_APP_SECRET": "你的 App Secret"
+      }
+    }
+  }
+}
+```
+
+#### 方式二：固定用户（推荐日常使用）
 
 ```json
 {
@@ -67,9 +157,7 @@ npx lark-bridge-mcp
 }
 ```
 
-### 方式三：邮箱/手机号查找用户
-
-如果飞书应用开通了通讯录权限，可以直接用企业邮箱或手机号：
+#### 方式三：邮箱 / 手机号
 
 **邮箱**（需要 `contact:user.email:readonly` 权限）：
 
@@ -93,86 +181,33 @@ npx lark-bridge-mcp
 }
 ```
 
-## 环境变量
+## 环境变量（Lite 版）
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `LARK_APP_ID` | ✅ | 飞书应用的 App ID |
-| `LARK_APP_SECRET` | ✅ | 飞书应用的 App Secret |
-| `LARK_RECEIVE_ID` | 可选 | 消息接收者标识（不填则自动从首条消息获取） |
-| `LARK_RECEIVE_ID_TYPE` | 可选 | ID 类型：`open_id` / `user_id` / `union_id` / `chat_id` / `email` / `mobile`，不填则自动推断 |
-| `LARK_ENCRYPT_KEY` | 可选 | 事件加密密钥（长连接模式通常不需要） |
-| `LARK_WAIT_TIMEOUT_SECONDS` | 可选 | `ask_user` 单次等待超时（秒），默认 `60` |
-| `LARK_MESSAGE_PREFIX` | 可选 | 发送消息前缀，默认空 |
-| `LARK_DAEMON_PORT` | 可选 | 守护进程 HTTP 端口，默认自动分配 |
-| `LARK_HEARTBEAT_TIMEOUT_MS` | 可选 | 心跳超时（毫秒），超过此时间认为 Agent 已断开，默认 `120000` |
-| `LARK_RELAUNCH_COOLDOWN_MS` | 可选 | 重新拉起 Agent 的冷却时间（毫秒），默认 `30000` |
+| `LARK_APP_ID` | 是 | 飞书应用 App ID |
+| `LARK_APP_SECRET` | 是 | 飞书应用 App Secret |
+| `LARK_RECEIVE_ID` | 否 | 消息接收者标识（不填则自动从首条消息获取） |
+| `LARK_RECEIVE_ID_TYPE` | 否 | ID 类型：`open_id` / `user_id` / `union_id` / `chat_id` / `email` / `mobile` |
+| `LARK_ENCRYPT_KEY` | 否 | 事件加密密钥（长连接模式通常不需要） |
+| `LARK_WAIT_TIMEOUT_SECONDS` | 否 | 单次等待超时秒数，默认 `60` |
+| `LARK_MESSAGE_PREFIX` | 否 | 发送消息前缀 |
+| `LARK_DAEMON_PORT` | 否 | 守护进程 HTTP 端口，默认自动分配 |
+| `LARK_HEARTBEAT_TIMEOUT_MS` | 否 | 心跳超时（毫秒），默认 `120000` |
+| `LARK_RELAUNCH_COOLDOWN_MS` | 否 | 重新拉起 Agent 冷却时间（毫秒），默认 `30000` |
 
-## 看门狗：自动重连 Cursor 会话
+## 看门狗：自动重连
 
-当 Cursor Agent 因网络中断或工具调用过多等原因断开时，看门狗会自动检测并重新拉起会话。
+当 Cursor Agent 因网络中断或其他原因断开时，看门狗会自动检测并重新拉起会话。
 
-### 工作原理
+**工作原理：**
 
-MCP Server 启动时会自动 fork 一个独立的**守护进程 (daemon)**：
+1. **Daemon** 维持飞书 WebSocket 长连接，不依赖 Cursor 进程
+2. **MCP Server** 每 15 秒向 Daemon 发送心跳
+3. 心跳超时（默认 120 秒）时，Daemon 判定 Agent 已断开
+4. 收到用户飞书消息且 Agent 已断开时，通过 Cursor CLI 自动拉起新会话
 
-- **守护进程**：维持飞书 WebSocket 长连接，不依赖 Cursor 进程。即使 Cursor 断开，飞书消息仍然能收到
-- **心跳机制**：MCP Server 每 15 秒向 daemon 发送心跳。如果心跳超时（默认 120 秒），daemon 判定 Agent 已断开
-- **自动拉起**：当收到用户飞书消息且 Agent 已断开时，通过 Cursor CLI (`agent`) 自动拉起新会话，优先恢复上一个 session
-
-```
-┌──────────────────────────────────────────────────────────┐
-│            lark-bridge-daemon (独立守护进程)                │
-│                                                           │
-│  ┌──────────────────┐  ┌───────────────────────────────┐ │
-│  │ Lark WebSocket   │  │ HTTP Server (localhost)       │ │
-│  │ (飞书长连接)      │  │  /send  /ask  /heartbeat     │ │
-│  │ 永不中断          │  │  供 MCP Server 调用           │ │
-│  └────────┬─────────┘  └──────────┬────────────────────┘ │
-│           │     消息队列           │                      │
-│           └───────────────────────┘                      │
-│                                                           │
-│  ┌──────────────────────────────────────────────────────┐ │
-│  │ 看门狗: 心跳超时 + 收到飞书消息 → CLI 拉起 Agent     │ │
-│  └──────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────┘
-         ↕ HTTP (localhost)
-┌──────────────────────┐
-│ lark-bridge-mcp      │  ← Cursor 子进程
-│ (MCP Server, stdio)  │
-│ 定时心跳 → daemon    │
-└──────────────────────┘
-```
-
-### 前提条件
-
-需要安装 Cursor CLI Agent（`agent` 命令）。安装方法参考 [Cursor CLI 文档](https://cursor.com/docs/cli/overview)。
-
-### 手动启动守护进程（可选）
-
-通常无需手动启动，MCP Server 会自动管理。如果需要手动启动：
-
-```bash
-npx lark-bridge-daemon
-```
-
-## ask_user 工作模式
-
-`ask_user` 支持两种调用方式，配合使用可以实现「发一次问题、持续轮询回复」的交互模式：
-
-| 调用方式 | 行为 |
-|---------|------|
-| `ask_user(prompt="你的问题")` | 发送消息并等待回复，超时返回 `[waiting]` |
-| `ask_user(prompt="")` | 仅检查新回复，不发送任何消息 |
-
-**推荐流程：**
-
-```
-1. ask_user(prompt="请确认是否继续？")    → 发送问题
-2. 如果返回 [waiting]                   → 用户还没回复
-3. ask_user(prompt="")                  → 轮询检查（不打扰用户）
-4. 重复步骤 3 直到收到回复
-```
+> 自动拉起需要安装 Cursor CLI（`agent` 命令）。桌面版可在 Dashboard 一键安装。
 
 ## 飞书应用配置
 
@@ -182,14 +217,28 @@ npx lark-bridge-daemon
 4. 在「权限管理」中开通权限：
    - **必须**：`im:message`（获取与发送单聊、群组消息）
    - **必须**：`im:message.p2p_msg:readonly`（获取用户发给机器人的单聊消息）
-   - *可选*：`contact:user.email:readonly`（通过邮箱查找用户，方式三需要）
-   - *可选*：`contact:user.phone:readonly`（通过手机号查找用户，方式三需要）
+   - *可选*：`contact:user.email:readonly`（通过邮箱查找用户）
+   - *可选*：`contact:user.phone:readonly`（通过手机号查找用户）
 5. 在「事件与回调」中选择「使用长连接」，添加 `im.message.receive_v1` 事件
 6. 在「版本管理与发布」中发布应用
 
-## 架构
+## 开发
 
-详见上方「看门狗：自动重连 Cursor 会话」章节的架构图。
+```bash
+# 安装依赖
+npm install
+cd lite && npm install && cd ..
+
+# 开发模式
+npm run dev
+
+# 构建
+npm run build
+
+# 打包
+npm run dist:win   # Windows
+npm run dist:mac   # macOS
+```
 
 ## License
 
