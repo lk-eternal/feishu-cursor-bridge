@@ -30,7 +30,7 @@ extraResources:
 win:
   icon: resources/icon.ico
   target:
-    - target: dir
+    - target: nsis
       arch:
         - x64
   signAndEditExecutable: false

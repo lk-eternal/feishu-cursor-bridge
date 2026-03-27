@@ -19,15 +19,12 @@ jobs:
         include:
           - os: windows-latest
             platform: win
-            artifact: release/win-unpacked
             artifact_name: feishu-cursor-bridge-windows
           - os: macos-latest
             platform: mac
-            artifact: release
             artifact_name: feishu-cursor-bridge-macos
           - os: ubuntu-latest
             platform: linux
-            artifact: release
             artifact_name: feishu-cursor-bridge-linux
 
     runs-on: ${{ matrix.os }}
@@ -74,11 +71,10 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: |
-            release/*.exe
+            release/*Setup*.exe
             release/*.dmg
             release/*.AppImage
             release/*.deb
-            release/win-unpacked/**
           if-no-files-found: warn
           retention-days: 30
 
@@ -104,7 +100,7 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
-            artifacts/**/*.exe
+            artifacts/**/*Setup*.exe
             artifacts/**/*.dmg
             artifacts/**/*.AppImage
             artifacts/**/*.deb
