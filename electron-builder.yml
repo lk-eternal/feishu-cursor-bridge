@@ -1,0 +1,53 @@
+appId: com.feishu-cursor-bridge.desktop
+productName: Feishu Cursor Bridge
+copyright: Copyright © 2026
+
+directories:
+  buildResources: resources
+  output: release
+
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+
+extraResources:
+  - from: dist-bundle/
+    to: daemon/
+    filter:
+      - "*.mjs"
+      - "*.map"
+  - from: lite/dist/
+    to: lite/dist/
+    filter:
+      - "*.js"
+      - "*.js.map"
+      - "*.d.ts"
+  - from: lite/node_modules/
+    to: lite/node_modules/
+  - from: resources/icon.ico
+    to: icon.ico
+
+win:
+  icon: resources/icon.ico
+  target:
+    - target: dir
+      arch:
+        - x64
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Feishu Cursor Bridge
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: resources/icon.icns
+  category: public.app-category.developer-tools
+
+dmg:
+  title: Feishu Cursor Bridge

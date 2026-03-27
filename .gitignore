@@ -1,0 +1,12 @@
+node_modules/
+dist/
+out/
+release/
+*.tgz
+.env
+.cursor/memory.md
+.cursor/.lark-daemon.json
+.cursor/lark-daemon.log
+.cursor/lark-daemon.log.old
+.cursor/agent-launch.log
+tmp_exec/
