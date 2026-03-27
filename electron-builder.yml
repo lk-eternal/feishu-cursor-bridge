@@ -24,11 +24,11 @@ extraResources:
       - "*.d.ts"
   - from: lite/node_modules/
     to: lite/node_modules/
-  - from: resources/icon.ico
-    to: icon.ico
+  - from: resources/icon.png
+    to: icon.png
 
 win:
-  icon: resources/icon.ico
+  icon: resources/icon.png
   target:
     - target: nsis
       arch:
@@ -46,7 +46,7 @@ mac:
       arch:
         - x64
         - arm64
-  icon: resources/icon.icns
+  icon: resources/icon.png
   category: public.app-category.developer-tools
 
 dmg:

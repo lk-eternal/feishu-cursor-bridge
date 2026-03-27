@@ -21,8 +21,8 @@ let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   const iconPath = app.isPackaged
-    ? path.join(process.resourcesPath, "icon.ico")
-    : path.join(app.getAppPath(), "resources", "icon.ico")
+    ? path.join(process.resourcesPath, "icon.png")
+    : path.join(app.getAppPath(), "resources", "icon.png")
 
   mainWindow = new BrowserWindow({
     width: 900,
