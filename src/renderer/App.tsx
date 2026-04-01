@@ -47,12 +47,16 @@ export default function App() {
     )
   }
 
-  switch (page) {
-    case "setup":
-      return <Setup onComplete={() => setPage("dashboard")} />
-    case "dashboard":
-      return <Dashboard onSettings={() => setPage("settings")} />
-    case "settings":
-      return <Settings onBack={() => setPage("dashboard")} />
+  if (page === "setup") {
+    return <Setup onComplete={() => setPage("dashboard")} />
   }
+
+  return (
+    <>
+      <div className={page === "dashboard" ? "" : "hidden"}>
+        <Dashboard onSettings={() => setPage("settings")} />
+      </div>
+      {page === "settings" && <Settings onBack={() => setPage("dashboard")} />}
+    </>
+  )
 }

@@ -5,7 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { initFileQueue, pushToFileQueue, pollFileQueueBatch, cleanupStaleMessages } from "./file-queue.js";
+import { initFileQueue, getQueueDir, pushToFileQueue, pollFileQueueBatch, cleanupStaleMessages } from "./file-queue.js";
 
 // ── stdout 保护：MCP 用 stdio 通信，任何非协议输出都会破坏 JSON-RPC 帧 ──
 const _origStdoutWrite = process.stdout.write.bind(process.stdout);
@@ -234,6 +234,39 @@ async function processIncomingMessage(messageId: string, messageType: string, co
   return parts.join("\n");
 }
 
+const COMMANDS = ["/stop", "/status", "/list", "/task", "/restart", "/help"];
+
+function isCommand(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return COMMANDS.some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
+}
+
+function extractCommand(text: string): string {
+  return text.trim().toLowerCase().split(/\s+/)[0];
+}
+
+function pushCommandToQueue(command: string, messageId: string): void {
+  const queueDir = getQueueDir();
+  if (!queueDir) return;
+  const ts = Date.now();
+  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  try {
+    const existing = fs.readdirSync(queueDir);
+    if (existing.some((f) => f.includes(`_${safeId}.fcmd`))) return;
+  } catch { /* ignore */ }
+
+  try {
+    const data = JSON.stringify({ command, messageId, timestamp: ts, source: `mcp-${process.pid}` });
+    const filename = `${ts}_${safeId}.fcmd`;
+    const tmpPath = path.join(queueDir, filename + ".tmp");
+    const finalPath = path.join(queueDir, filename);
+    fs.writeFileSync(tmpPath, data, "utf-8");
+    fs.renameSync(tmpPath, finalPath);
+    log("INFO", `指令已入队: ${command} (msgId=${messageId}, source=mcp)`);
+  } catch { /* ignore */ }
+}
+
 function pushMessage(content: string, messageId?: string): void {
   if (!content?.trim()) {
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
@@ -269,6 +302,12 @@ function startLarkConnection(): void {
           log("INFO", `自动识别用户 open_id: ${senderOpenId}（可保存到 LARK_RECEIVE_ID 配置中）`);
         }
 
+        if (messageType === "text" && isCommand(text)) {
+          const cmd = extractCommand(text);
+          pushCommandToQueue(cmd, messageId);
+          return;
+        }
+
         if (messageType === "image" || messageType === "post") {
           processIncomingMessage(messageId, messageType, rawContent)
             .then((result) => pushMessage(result, messageId))
@@ -287,7 +326,7 @@ function startLarkConnection(): void {
 
 // ── MCP Server ──────────────────────────────────────────
 
-const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.3.1", description: "飞书消息桥接 – 通过飞书与用户沟通" });
+const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.4.0", description: "飞书消息桥接 – 通过飞书与用户沟通" });
 
 mcpServer.tool(
   "sync_message",
@@ -336,7 +375,7 @@ export async function main(): Promise<void> {
   }
 
   log("INFO", "════════════════════════════════════════════════");
-  log("INFO", `feishu-cursor-bridge MCP v2.3.1 启动 (PID=${process.pid})`);
+  log("INFO", `feishu-cursor-bridge MCP v2.4.0 启动 (PID=${process.pid})`);
   log("INFO", "════════════════════════════════════════════════");
 
   const queueDir = initFileQueue(APP_ID);

@@ -42,6 +42,23 @@ export interface InjectResult {
   message: string
 }
 
+export interface McpAuthInfo {
+  name: string
+  url: string
+  authenticated: boolean
+}
+
+export interface McpServerEntry {
+  name: string
+  type: "command" | "url"
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+  source: "global" | "project"
+  authenticated?: boolean
+}
+
 const api = {
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke("config:get"),
   saveConfig: (config: Partial<AppConfig>): Promise<void> => ipcRenderer.invoke("config:save", config),
@@ -62,6 +79,22 @@ const api = {
   getScheduledTasks: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduled-tasks:get"),
   saveScheduledTasks: (tasks: ScheduledTask[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("scheduled-tasks:save", tasks),
   validateCron: (expression: string): Promise<boolean> => ipcRenderer.invoke("scheduled-tasks:validate-cron", expression),
+  getOAuthMcps: (): Promise<McpAuthInfo[]> => ipcRenderer.invoke("mcp:list-oauth"),
+  getMcpServers: (): Promise<McpServerEntry[]> => ipcRenderer.invoke("mcp:list-all"),
+  saveMcpServer: (name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:save", name, entry, source),
+  deleteMcpServer: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:delete", name),
+  loginMcp: (name: string): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("mcp:login", name),
+  getRules: (): Promise<{ name: string; content: string }[]> => ipcRenderer.invoke("rules:list"),
+  saveRule: (name: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:save", name, content),
+  deleteRule: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:delete", name),
+  getSkills: (): Promise<{ name: string; content: string }[]> => ipcRenderer.invoke("skills:list"),
+  saveSkill: (name: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:save", name, content),
+  deleteSkill: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:delete", name),
+  onMcpLoginComplete: (cb: (data: { serverName: string; ok: boolean }) => void) => {
+    const handler = (_: unknown, data: { serverName: string; ok: boolean }) => cb(data)
+    ipcRenderer.on("mcp:login-complete", handler)
+    return () => ipcRenderer.removeListener("mcp:login-complete", handler)
+  },
   onDaemonStatus: (cb: (status: DaemonStatus) => void) => {
     const handler = (_: unknown, status: DaemonStatus) => cb(status)
     ipcRenderer.on("daemon:status-update", handler)

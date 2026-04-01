@@ -293,13 +293,13 @@ function pushToFileQueue(text: string, messageId?: string): boolean {
   if (messageId) {
     try {
       const existing = fs.readdirSync(fileQueueDir);
-      if (existing.some((f) => f.endsWith(`_${safeId}.msg`) || f.endsWith(`_${safeId}.claimed`))) return false;
+      if (existing.some((f) => f.endsWith(`_${safeId}.qmsg`) || f.endsWith(`_${safeId}.claimed`))) return false;
     } catch { /* ignore */ }
   }
 
   try {
     const data = JSON.stringify({ text, messageId: id, timestamp: ts, source: `daemon-${process.pid}` });
-    const filename = `${ts}_${safeId}.msg`;
+    const filename = `${ts}_${safeId}.qmsg`;
     const tmpPath = path.join(fileQueueDir, filename + ".tmp");
     const finalPath = path.join(fileQueueDir, filename);
     fs.writeFileSync(tmpPath, data, "utf-8");
@@ -311,10 +311,10 @@ function pushToFileQueue(text: string, messageId?: string): boolean {
 function claimNextMessage(): string | null {
   if (!fileQueueDir) return null;
   let files: string[];
-  try { files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".msg")).sort(); } catch { return null; }
+  try { files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".qmsg")).sort(); } catch { return null; }
   for (const file of files) {
     const srcPath = path.join(fileQueueDir, file);
-    const claimedPath = srcPath.replace(/\.msg$/, ".claimed");
+    const claimedPath = srcPath.replace(/\.qmsg$/, ".claimed");
     try { fs.renameSync(srcPath, claimedPath); } catch { continue; }
     try {
       const raw = fs.readFileSync(claimedPath, "utf-8");
@@ -331,21 +331,33 @@ function claimNextMessage(): string | null {
 
 function getFileQueueLength(): number {
   if (!fileQueueDir) return 0;
-  try { return fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".msg")).length; } catch { return 0; }
+  try { return fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".qmsg")).length; } catch { return 0; }
 }
 
 function getFileQueueMessages(): { index: number; preview: string }[] {
   if (!fileQueueDir) return [];
   try {
-    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".msg")).sort();
+    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".qmsg")).sort();
     return files.map((f, i) => {
       try {
         const raw = fs.readFileSync(path.join(fileQueueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
-        return { index: i, preview: (parsed.text ?? "").slice(0, 200) };
+        return { index: i, preview: parsed.text ?? "" };
       } catch { return { index: i, preview: "(unreadable)" }; }
     });
   } catch { return []; }
+}
+
+function clearFileQueue(): number {
+  if (!fileQueueDir) return 0;
+  try {
+    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".qmsg"));
+    for (const f of files) {
+      try { fs.unlinkSync(path.join(fileQueueDir, f)); } catch { /* ignore */ }
+    }
+    log("INFO", `队列已清空: ${files.length} 条消息`);
+    return files.length;
+  } catch { return 0; }
 }
 
 function pollFileQueue(timeoutMs: number): Promise<string | null> {
@@ -413,6 +425,13 @@ function startLarkConnection(): void {
           autoOpenId = senderOpenId;
         }
 
+        if (messageType === "text" && isCommand(text)) {
+          handleCommand(text, messageId).catch((e: any) =>
+            log("ERROR", `指令处理失败: ${e?.message ?? e}`),
+          );
+          return;
+        }
+
         if (messageType === "image" || messageType === "post") {
           processIncomingMessage(messageId, messageType, rawContent)
             .then((result) => pushMessage(result, messageId))
@@ -438,8 +457,133 @@ function startLarkConnection(): void {
   log("INFO", "飞书 WebSocket 长连接启动中...");
 }
 
-// ── 工作区规则（只保留 rules，不再注入 hooks）───────────────
+// ── 指令系统 ─────────────────────────────────────────────
 
+const COMMANDS: Record<string, string> = {
+  "/stop": "停止当前运行中的 Agent",
+  "/status": "查看 Agent / Daemon 状态",
+  "/list": "查看消息队列列表（不消费）",
+  "/task": "查看定时任务列表",
+  "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
+  "/help": "显示可用指令列表",
+};
+
+function isCommand(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return Object.keys(COMMANDS).some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
+}
+
+function extractCommand(text: string): string {
+  return text.trim().toLowerCase().split(/\s+/)[0];
+}
+
+async function replyToMessage(messageId: string, text: string): Promise<void> {
+  try {
+    await larkClient.im.message.reply({
+      path: { message_id: messageId },
+      data: { content: JSON.stringify({ text }), msg_type: "text" },
+    });
+  } catch (e: any) {
+    log("WARN", `回复消息失败 (id=${messageId}), fallback 到发送: ${e?.message}`);
+    await sendLarkMessage(text);
+  }
+}
+
+// ── 共享指令文件队列（.fcmd 文件，MCP 和 Daemon 平权写入）──
+
+function pushCommandToQueue(command: string, messageId: string, source: string): boolean {
+  if (!fileQueueDir) return false;
+  const ts = Date.now();
+  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  try {
+    const existing = fs.readdirSync(fileQueueDir);
+    if (existing.some((f) => f.includes(`_${safeId}.fcmd`))) return false;
+  } catch { /* ignore */ }
+
+  try {
+    const data = JSON.stringify({ command, messageId, timestamp: ts, source });
+    const filename = `${ts}_${safeId}.fcmd`;
+    const tmpPath = path.join(fileQueueDir, filename + ".tmp");
+    const finalPath = path.join(fileQueueDir, filename);
+    fs.writeFileSync(tmpPath, data, "utf-8");
+    fs.renameSync(tmpPath, finalPath);
+    log("INFO", `指令已入队: ${command} (msgId=${messageId}, source=${source})`);
+    return true;
+  } catch { return false; }
+}
+
+function getPendingCommands(): { id: string; command: string; messageId: string }[] {
+  if (!fileQueueDir) return [];
+  try {
+    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".fcmd")).sort();
+    return files.map((f) => {
+      try {
+        const raw = fs.readFileSync(path.join(fileQueueDir, f), "utf-8");
+        const parsed = JSON.parse(raw);
+        return { id: f, command: parsed.command, messageId: parsed.messageId };
+      } catch { return null; }
+    }).filter(Boolean) as { id: string; command: string; messageId: string }[];
+  } catch { return []; }
+}
+
+function claimCommand(fileId: string): { command: string; messageId: string } | null {
+  if (!fileQueueDir) return null;
+  const srcPath = path.join(fileQueueDir, fileId);
+  const claimedPath = srcPath + ".claimed";
+  try {
+    fs.renameSync(srcPath, claimedPath);
+    const raw = fs.readFileSync(claimedPath, "utf-8");
+    fs.unlinkSync(claimedPath);
+    const parsed = JSON.parse(raw);
+    return { command: parsed.command, messageId: parsed.messageId };
+  } catch { return null; }
+}
+
+function cleanExpiredCommands(): void {
+  if (!fileQueueDir) return;
+  const now = Date.now();
+  try {
+    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".fcmd"));
+    for (const f of files) {
+      try {
+        const raw = fs.readFileSync(path.join(fileQueueDir, f), "utf-8");
+        const parsed = JSON.parse(raw);
+        if (now - (parsed.timestamp ?? 0) > 60_000) {
+          fs.unlinkSync(path.join(fileQueueDir, f));
+          log("WARN", `指令超时已清除: ${parsed.command} (msgId=${parsed.messageId})`);
+          if (parsed.messageId) {
+            replyToMessage(parsed.messageId, `⚠️ 指令 ${parsed.command} 执行超时`).catch(() => {});
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+function cleanCommandMessagesFromQueue(): void {
+  if (!fileQueueDir) return;
+  try {
+    const files = fs.readdirSync(fileQueueDir).filter((f) => f.endsWith(".qmsg"));
+    for (const f of files) {
+      try {
+        const raw = fs.readFileSync(path.join(fileQueueDir, f), "utf-8");
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.text === "string" && isCommand(parsed.text)) {
+          fs.unlinkSync(path.join(fileQueueDir, f));
+          log("INFO", `从消息队列中清除指令消息: "${parsed.text.slice(0, 30)}"`);
+        }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+async function handleCommand(text: string, messageId: string): Promise<void> {
+  const cmd = extractCommand(text);
+  log("INFO", `处理指令: ${cmd} (msgId=${messageId})`);
+  pushCommandToQueue(cmd, messageId, `daemon-${process.pid}`);
+  setTimeout(() => cleanCommandMessagesFromQueue(), 2000);
+}
 
 // ── HTTP Server ──────────────────────────────────────────
 
@@ -467,6 +611,7 @@ function startHttpServer(): Promise<number> {
       try {
         // ── 健康检查
         if (method === "GET" && pathname === "/health") {
+          cleanExpiredCommands();
           json(res, {
             status: "ok",
             version: PKG_VERSION,
@@ -542,10 +687,44 @@ function startHttpServer(): Promise<number> {
           return;
         }
 
+        // ── 清空队列
+        if (method === "POST" && pathname === "/clear-queue") {
+          const cleared = clearFileQueue();
+          json(res, { ok: true, cleared });
+          return;
+        }
+
         // ── 立即出队（供 Electron 主进程内部调用，无收集窗口）
         if (method === "GET" && pathname === "/dequeue") {
           const msg = claimNextMessage();
           json(res, { message: msg, queueLength: getFileQueueLength() });
+          return;
+        }
+
+        // ── 指令队列：获取待处理指令
+        if (method === "GET" && pathname === "/commands") {
+          const commands = getPendingCommands();
+          json(res, { commands });
+          return;
+        }
+
+        // ── 指令队列：认领指令
+        if (method === "POST" && pathname === "/commands/claim") {
+          const body = JSON.parse(await readBody(req));
+          const result = claimCommand(body.id);
+          json(res, result ? { ok: true, ...result } : { ok: false, error: "not found" });
+          return;
+        }
+
+        // ── 指令结果回报（Electron → Daemon → Lark 回复）
+        if (method === "POST" && pathname === "/cmd/result") {
+          const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string };
+          log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}`);
+          if (body.messageId) {
+            const icon = body.ok ? "✅" : "❌";
+            await replyToMessage(body.messageId, `${icon} ${body.message}`);
+          }
+          json(res, { ok: true });
           return;
         }
 

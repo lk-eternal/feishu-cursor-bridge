@@ -15,12 +15,6 @@ import {
   Download,
   CheckCircle2,
   AlertTriangle,
-  Plus,
-  Trash2,
-  Pencil,
-  Timer,
-  X,
-  Check,
 } from "lucide-react"
 
 interface Props {
@@ -39,10 +33,6 @@ export default function Dashboard({ onSettings }: Props) {
   const [cliInstalling, setCliInstalling] = useState(false)
   const [cliMessage, setCliMessage] = useState("")
   const [stoppingAgent, setStoppingAgent] = useState(false)
-  const [tasks, setTasks] = useState<ScheduledTask[]>([])
-  const [showTasks, setShowTasks] = useState(false)
-  const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null)
-  const [cronValid, setCronValid] = useState(true)
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
@@ -60,10 +50,6 @@ export default function Dashboard({ onSettings }: Props) {
     const timer = setInterval(refresh, 5_000)
 
     window.electronAPI.checkCli().then((ok) => setCliStatus(ok ? "installed" : "missing"))
-    window.electronAPI.getScheduledTasks().then(setTasks)
-    const taskTimer = setInterval(() => {
-      window.electronAPI.getScheduledTasks().then(setTasks)
-    }, 5_000)
     window.electronAPI.getLogBuffer().then((buf) => {
       if (buf.length > 0) setLogs(buf.join("\n"))
     })
@@ -78,7 +64,6 @@ export default function Dashboard({ onSettings }: Props) {
     })
     return () => {
       clearInterval(timer)
-      clearInterval(taskTimer)
       unsub()
       unsubLog()
     }
@@ -130,9 +115,11 @@ export default function Dashboard({ onSettings }: Props) {
     setCliMessage("")
     try {
       const result = await window.electronAPI.installCli()
-      setCliMessage(result.output)
       if (result.ok) {
         setCliStatus("installed")
+        setCliMessage("")
+      } else {
+        setCliMessage(result.output)
       }
     } catch (e: unknown) {
       setCliMessage(e instanceof Error ? e.message : String(e))
@@ -156,48 +143,6 @@ export default function Dashboard({ onSettings }: Props) {
       setQueueMessages(msgs)
     }
     setShowQueue(!showQueue)
-  }
-
-  const saveTasks = async (updated: ScheduledTask[]) => {
-    setTasks(updated)
-    await window.electronAPI.saveScheduledTasks(updated)
-  }
-
-  const handleAddTask = () => {
-    setEditingTask({
-      id: crypto.randomUUID(),
-      name: "",
-      cron: "",
-      content: "",
-      enabled: true,
-    })
-    setCronValid(true)
-    setShowTasks(true)
-  }
-
-  const handleSaveTask = async () => {
-    if (!editingTask || !editingTask.name.trim() || !editingTask.cron.trim() || !editingTask.content.trim()) return
-    const valid = await window.electronAPI.validateCron(editingTask.cron)
-    if (!valid) {
-      setCronValid(false)
-      return
-    }
-    const exists = tasks.find((t) => t.id === editingTask.id)
-    const updated = exists
-      ? tasks.map((t) => (t.id === editingTask.id ? editingTask : t))
-      : [...tasks, editingTask]
-    await saveTasks(updated)
-    setEditingTask(null)
-  }
-
-  const handleDeleteTask = async (id: string) => {
-    await saveTasks(tasks.filter((t) => t.id !== id))
-    if (editingTask?.id === id) setEditingTask(null)
-  }
-
-  const handleToggleTask = async (id: string) => {
-    const updated = tasks.map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t))
-    await saveTasks(updated)
   }
 
   const formatUptime = (seconds?: number): string => {
@@ -357,140 +302,6 @@ export default function Dashboard({ onSettings }: Props) {
           {actionError}
         </div>
       )}
-
-      {/* Scheduled Tasks */}
-      <div className="mx-6 mt-3">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setShowTasks(!showTasks)}
-            className="flex items-center gap-2 text-sm text-gray-400 transition hover:text-gray-200"
-          >
-            <Timer size={14} />
-            <span>定时任务</span>
-            {tasks.length > 0 && (
-              <span className="rounded bg-gray-800 px-1.5 py-0.5 text-xs text-gray-500">
-                {tasks.filter((t) => t.enabled).length}/{tasks.length}
-              </span>
-            )}
-          </button>
-          <button
-            onClick={handleAddTask}
-            className="flex items-center gap-1 rounded px-2 py-1 text-xs text-blue-400 transition hover:bg-blue-600/20"
-          >
-            <Plus size={12} />
-            添加
-          </button>
-        </div>
-
-        {showTasks && (
-          <div className="mt-2 space-y-2">
-            {tasks.map((task) => (
-              <div
-                key={task.id}
-                className="flex items-center justify-between rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs font-medium ${task.enabled ? "text-gray-200" : "text-gray-600"}`}>
-                      {task.name}
-                    </span>
-                    <code className={`rounded bg-gray-800 px-1.5 py-0.5 text-xs ${task.enabled ? "text-blue-400" : "text-gray-600"}`}>
-                      {task.cron}
-                    </code>
-                  </div>
-                  <div className="mt-0.5 truncate text-xs text-gray-600">{task.content}</div>
-                </div>
-                <div className="ml-3 flex items-center gap-1">
-                  <button
-                    onClick={() => handleToggleTask(task.id)}
-                    className={`rounded px-1.5 py-0.5 text-xs transition ${
-                      task.enabled
-                        ? "text-green-400 hover:bg-green-600/20"
-                        : "text-gray-600 hover:bg-gray-700/50"
-                    }`}
-                    title={task.enabled ? "禁用" : "启用"}
-                  >
-                    {task.enabled ? "ON" : "OFF"}
-                  </button>
-                  <button
-                    onClick={() => { setEditingTask({ ...task }); setCronValid(true) }}
-                    className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-gray-300"
-                    title="编辑"
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    onClick={() => handleDeleteTask(task.id)}
-                    className="rounded p-1 text-gray-500 transition hover:bg-red-600/20 hover:text-red-400"
-                    title="删除"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              </div>
-            ))}
-
-            {editingTask && (
-              <div className="rounded-lg border border-blue-800/50 bg-blue-950/10 p-3 space-y-2">
-                <div className="flex gap-2">
-                  <input
-                    value={editingTask.name}
-                    onChange={(e) => setEditingTask({ ...editingTask, name: e.target.value })}
-                    placeholder="任务名称"
-                    className="flex-1 rounded border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-200 outline-none focus:border-blue-600"
-                  />
-                  <div className="flex flex-col">
-                    <input
-                      value={editingTask.cron}
-                      onChange={(e) => { setEditingTask({ ...editingTask, cron: e.target.value }); setCronValid(true) }}
-                      placeholder="cron 表达式，如 0 9 * * *"
-                      className={`w-48 rounded border bg-gray-900 px-2 py-1 text-xs text-gray-200 outline-none focus:border-blue-600 ${
-                        cronValid ? "border-gray-700" : "border-red-600"
-                      }`}
-                    />
-                    {!cronValid && <span className="mt-0.5 text-xs text-red-400">无效的 cron 表达式</span>}
-                  </div>
-                </div>
-                <textarea
-                  value={editingTask.content}
-                  onChange={(e) => setEditingTask({ ...editingTask, content: e.target.value })}
-                  placeholder="任务内容（将作为消息发送给 Agent）"
-                  rows={3}
-                  className="w-full rounded border border-gray-700 bg-gray-900 px-2 py-1.5 text-xs text-gray-200 outline-none focus:border-blue-600"
-                />
-                <div className="flex items-center justify-between">
-                  <div className="text-xs text-gray-600">
-                    示例: <code className="text-gray-500">*/5 * * * *</code> 每5分钟 · <code className="text-gray-500">0 9 * * 1-5</code> 工作日9点 · <code className="text-gray-500">0 */2 * * *</code> 每2小时
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setEditingTask(null)}
-                      className="flex items-center gap-1 rounded px-2 py-1 text-xs text-gray-400 transition hover:bg-gray-800"
-                    >
-                      <X size={12} />
-                      取消
-                    </button>
-                    <button
-                      onClick={handleSaveTask}
-                      disabled={!editingTask.name.trim() || !editingTask.cron.trim() || !editingTask.content.trim()}
-                      className="flex items-center gap-1 rounded bg-blue-600/20 px-2 py-1 text-xs text-blue-400 transition hover:bg-blue-600/30 disabled:opacity-40"
-                    >
-                      <Check size={12} />
-                      保存
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {tasks.length === 0 && !editingTask && (
-              <div className="py-3 text-center text-xs text-gray-600">
-                暂无定时任务，点击「添加」创建
-              </div>
-            )}
-          </div>
-        )}
-      </div>
 
       {/* Logs */}
       <div className="flex min-h-0 flex-1 flex-col px-6 py-4">

@@ -20,6 +20,17 @@ interface ScheduledTask {
   enabled: boolean
 }
 
+interface McpServerEntry {
+  name: string
+  type: "command" | "url"
+  command?: string
+  args?: string[]
+  url?: string
+  env?: Record<string, string>
+  source: "global" | "project"
+  authenticated?: boolean
+}
+
 interface DaemonStatus {
   running: boolean
   version?: string
@@ -52,6 +63,18 @@ interface ElectronAPI {
   getScheduledTasks(): Promise<ScheduledTask[]>
   saveScheduledTasks(tasks: ScheduledTask[]): Promise<{ ok: boolean }>
   validateCron(expression: string): Promise<boolean>
+  getOAuthMcps(): Promise<{ name: string; url: string; authenticated: boolean }[]>
+  getMcpServers(): Promise<McpServerEntry[]>
+  saveMcpServer(name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }>
+  deleteMcpServer(name: string): Promise<{ ok: boolean }>
+  loginMcp(name: string): Promise<{ ok: boolean; output: string }>
+  getRules(): Promise<{ name: string; content: string }[]>
+  saveRule(name: string, content: string): Promise<{ ok: boolean }>
+  deleteRule(name: string): Promise<{ ok: boolean }>
+  getSkills(): Promise<{ name: string; content: string }[]>
+  saveSkill(name: string, content: string): Promise<{ ok: boolean }>
+  deleteSkill(name: string): Promise<{ ok: boolean }>
+  onMcpLoginComplete(cb: (data: { serverName: string; ok: boolean }) => void): () => void
   onDaemonStatus(cb: (status: DaemonStatus) => void): () => void
   onDaemonLog(cb: (line: string) => void): () => void
 }

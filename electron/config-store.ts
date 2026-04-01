@@ -21,6 +21,7 @@ export interface AppConfig {
   httpsProxy: string
   noProxy: string
   scheduledTasks: ScheduledTask[]
+  verifiedMcpServers: string[]
 }
 
 const defaults: AppConfig = {
@@ -36,6 +37,7 @@ const defaults: AppConfig = {
   httpsProxy: "",
   noProxy: "localhost,127.0.0.1",
   scheduledTasks: [],
+  verifiedMcpServers: [],
 }
 
 const store = new Store<AppConfig>({

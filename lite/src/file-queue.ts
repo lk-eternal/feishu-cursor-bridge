@@ -24,12 +24,12 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   const ts = Date.now();
   const id = messageId || `${ts}-${Math.random().toString(36).slice(2, 8)}`;
   const safeId = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const filename = `${ts}_${safeId}.msg`;
+  const filename = `${ts}_${safeId}.qmsg`;
 
   if (messageId) {
     try {
       const existing = fs.readdirSync(queueDir);
-      if (existing.some((f) => f.endsWith(`_${safeId}.msg`) || f.endsWith(`_${safeId}.claimed`))) {
+      if (existing.some((f) => f.endsWith(`_${safeId}.qmsg`) || f.endsWith(`_${safeId}.claimed`))) {
         return false;
       }
     } catch { /* ignore */ }
@@ -52,14 +52,14 @@ export function claimNextMessage(): string | null {
 
   let files: string[];
   try {
-    files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".msg")).sort();
+    files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
   } catch {
     return null;
   }
 
   for (const file of files) {
     const srcPath = path.join(queueDir, file);
-    const claimedPath = srcPath.replace(/\.msg$/, ".claimed");
+    const claimedPath = srcPath.replace(/\.qmsg$/, ".claimed");
     try {
       fs.renameSync(srcPath, claimedPath);
     } catch {
@@ -109,7 +109,7 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
 export function getQueueLength(): number {
   if (!queueDir) return 0;
   try {
-    return fs.readdirSync(queueDir).filter((f) => f.endsWith(".msg")).length;
+    return fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).length;
   } catch {
     return 0;
   }
@@ -118,7 +118,7 @@ export function getQueueLength(): number {
 export function getQueueMessages(): { index: number; preview: string }[] {
   if (!queueDir) return [];
   try {
-    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".msg")).sort();
+    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
     return files.map((f, i) => {
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
