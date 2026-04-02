@@ -63,18 +63,33 @@
 
 从 [Releases](../../releases) 页面下载对应平台的安装包：
 
-| 平台 | 格式 |
-|------|------|
-| Windows | `.exe` 安装包 |
-| macOS (Intel) | `.dmg` |
-| macOS (Apple Silicon) | `.dmg` |
-| Linux | `.deb` / `.AppImage` |
+| 平台 | 格式 | 备注 |
+|------|------|------|
+| Windows | `.exe` 安装包 | 直接运行安装 |
+| macOS (Intel) | `.dmg` | 首次打开需解除 Gatekeeper（见下方说明） |
+| macOS (Apple Silicon) | `.dmg` | 首次打开需解除 Gatekeeper（见下方说明） |
+| macOS (Homebrew) | `brew install --cask` | 推荐，便于升级管理 |
+| Linux | `.deb` / `.AppImage` | 直接运行 |
 
 **macOS 用户也可通过 Homebrew 安装：**
 
 ```bash
 brew tap lk-eternal/tap
 brew install --cask feishu-cursor-bridge
+```
+
+> **首次打开可能提示"无法验证开发者"？** 这是因为应用尚未经过 Apple 签名，macOS Gatekeeper 会拦截。解决方法：
+>
+> ```bash
+> xattr -cr /Applications/Feishu\ Cursor\ Bridge.app
+> ```
+>
+> 或者到 **系统设置 → 隐私与安全性** 中点击"仍然打开"。
+
+**升级到最新版：**
+
+```bash
+brew update && brew upgrade --cask feishu-cursor-bridge
 ```
 
 启动后按向导完成配置即可，无需手动编辑任何文件。
