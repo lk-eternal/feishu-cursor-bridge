@@ -1,0 +1,10 @@
+---
+description: 从对话反馈中积累的编码约定和偏好
+alwaysApply: true
+---
+
+# 编码约定
+
+## MCP 认证流程
+- MCP 认证不需要加 `--approve-mcps` 参数
+- 正确流程：先 `agent mcp enable <server_name>`，再 `agent mcp login <server_name>`

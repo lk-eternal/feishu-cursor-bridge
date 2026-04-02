@@ -1,5 +1,4 @@
 import { spawn, execSync, type ChildProcess } from "node:child_process"
-import * as crypto from "node:crypto"
 import * as http from "node:http"
 import * as path from "node:path"
 import * as fs from "node:fs"
@@ -758,7 +757,10 @@ export function launchAgent(initialMessage?: string): { ok: boolean; error?: str
     ? `以下是用户通过飞书发来的消息，请直接处理，不要发送问候语：\n\n${initialMessage}`
     : "请立即调用 ask_user 工具（prompt 参数留空）获取待处理的飞书消息，然后根据消息内容开始工作。不要发送问候消息。"
   const args = [
-    "-p", "--force", "--approve-mcps",
+    "--print", 
+    "--force", 
+    "--continue", 
+    "--approve-mcps",
     "--workspace", config.workspaceDir,
     "--trust",
   ]
@@ -1010,6 +1012,73 @@ export interface McpServerEntry {
   env?: Record<string, string>
   source: "global" | "project"
   authenticated?: boolean
+  rawConfig?: Record<string, unknown>
+  enabled?: boolean
+}
+
+function spawnAsync(args: string[], cwd: string, env: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    let stdout = "", stderr = ""
+    const child = agentNodePath && agentIndexPath
+      ? spawn(agentNodePath, [agentIndexPath, ...args], {
+          windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd, env,
+        })
+      : spawn("agent", args, {
+          shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd, env,
+        })
+    child.stdout?.on("data", (d: Buffer) => { stdout += d.toString() })
+    child.stderr?.on("data", (d: Buffer) => { stderr += d.toString() })
+    child.on("error", () => resolve({ code: 1, stdout, stderr }))
+    child.on("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }))
+    setTimeout(() => { try { child.kill() } catch { /* */ }; resolve({ code: 1, stdout, stderr }) }, 10_000)
+  })
+}
+
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g
+
+function isEnabledStatus(status: string): boolean {
+  const s = status.toLowerCase()
+  return s !== "disabled" && !s.includes("not loaded")
+}
+
+export async function getMcpEnabledMap(): Promise<Record<string, boolean>> {
+  const config = getConfig()
+  if (!config.workspaceDir || !resolveAgentBinary()) return {}
+
+  const env: Record<string, string> = { ...process.env as Record<string, string> }
+  applyProxyEnv(env, config)
+
+  try {
+    const r = await spawnAsync(["mcp", "list"], config.workspaceDir, env)
+    const clean = r.stdout.replace(ANSI_RE, "").replace(/\r/g, "")
+    const result: Record<string, boolean> = {}
+    for (const line of clean.split("\n")) {
+      const m = line.match(/^(.+?):\s+(.+)$/)
+      if (m) result[m[1].trim()] = isEnabledStatus(m[2].trim())
+    }
+    return result
+  } catch {
+    return {}
+  }
+}
+
+export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
+  const config = getConfig()
+  if (!config.workspaceDir) return { ok: false, output: "工作目录未配置" }
+  if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
+
+  const env: Record<string, string> = { ...process.env as Record<string, string> }
+  applyProxyEnv(env, config)
+
+  const sub = enabled ? "enable" : "disable"
+  try {
+    const r = await spawnAsync(["mcp", sub, serverName], config.workspaceDir, env)
+    const out = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
+    broadcastLog(`[MCP ${sub}] ${serverName}: ${out.slice(0, 200)}`)
+    return { ok: r.code === 0, output: out }
+  } catch (e: unknown) {
+    return { ok: false, output: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 export function getMcpServerList(): McpServerEntry[] {
@@ -1038,12 +1107,18 @@ export function getMcpServerList(): McpServerEntry[] {
           name,
           type: isUrl ? "url" : "command",
           source,
+          rawConfig: entry,
         }
         if (isUrl) {
           item.url = entry.url as string
-          const auth = authData[name] as Record<string, unknown> | undefined
-          const hasToken = !!(auth?.tokens && (auth.tokens as Record<string, unknown>).access_token)
-          item.authenticated = hasToken || verified.includes(name)
+          const hasHeaders = !!(entry.headers && typeof entry.headers === "object" && Object.keys(entry.headers as object).length > 0)
+          if (hasHeaders) {
+            item.authenticated = true
+          } else {
+            const auth = authData[name] as Record<string, unknown> | undefined
+            const hasToken = !!(auth?.tokens && (auth.tokens as Record<string, unknown>).access_token)
+            item.authenticated = hasToken || verified.includes(name)
+          }
         } else {
           item.command = entry.command as string
           item.args = entry.args as string[] | undefined
@@ -1053,6 +1128,7 @@ export function getMcpServerList(): McpServerEntry[] {
       }
     } catch { /* ignore */ }
   }
+
   return result
 }
 
@@ -1105,37 +1181,17 @@ export function getOAuthMcpList(): McpAuthInfo[] {
     .map((s) => ({ name: s.name, url: s.url!, authenticated: s.authenticated ?? false }))
 }
 
-function ensureMcpApproval(serverName: string, workspaceDir: string): void {
-  const projectDir = findProjectDir(workspaceDir)
-    ?? path.join(os.homedir(), ".cursor", "projects", getProjectSlug(workspaceDir))
-  const approvalsPath = path.join(projectDir, "mcp-approvals.json")
-
-  try {
-    let approvals: string[] = []
-    if (fs.existsSync(approvalsPath)) {
-      approvals = JSON.parse(fs.readFileSync(approvalsPath, "utf-8"))
-    }
-    if (approvals.some((a) => a.startsWith(serverName + "-"))) return
-
-    const hash = crypto.randomBytes(8).toString("hex")
-    approvals.push(`${serverName}-${hash}`)
-
-    const dir = path.dirname(approvalsPath)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(approvalsPath, JSON.stringify(approvals, null, 2), "utf-8")
-    broadcastLog(`MCP "${serverName}" 已添加到审批列表`)
-  } catch (e: unknown) {
-    broadcastLog(`添加 MCP 审批失败: ${e instanceof Error ? e.message : e}`)
-  }
-}
-
 let mcpLoginChild: ChildProcess | null = null
+let mcpLoginGeneration = 0
 
 export function loginMcpServer(serverName: string): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
+  const gen = ++mcpLoginGeneration
+
+  return new Promise<{ ok: boolean; output: string }>(async (resolve) => {
     if (mcpLoginChild) {
-      resolve({ ok: false, output: "已有 MCP 登录进程在运行" })
-      return
+      try { mcpLoginChild.kill() } catch { /* ignore */ }
+      mcpLoginChild = null
+      broadcastLog(`[MCP Login] 终止上一次未完成的登录进程`)
     }
 
     const config = getConfig()
@@ -1149,15 +1205,21 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
       return
     }
 
-    ensureMcpApproval(serverName, config.workspaceDir)
-
-    const args = [
-      "--approve-mcps", "--workspace", config.workspaceDir,
-      "mcp", "login", serverName,
-    ]
-
     const spawnEnv: Record<string, string> = { ...process.env as Record<string, string> }
     applyProxyEnv(spawnEnv, config)
+
+    // 先 enable 再 login（异步）
+    try {
+      const er = await spawnAsync(["mcp", "enable", serverName], config.workspaceDir, spawnEnv)
+      broadcastLog(`[MCP Enable] "${serverName}": ${(er.stdout + er.stderr).trim().slice(0, 200) || "已启用"}`)
+    } catch (e: unknown) {
+      broadcastLog(`[MCP Enable] 启用失败: ${e instanceof Error ? e.message : e}`)
+    }
+
+    const args = [
+      "--workspace", config.workspaceDir,
+      "mcp", "login", serverName,
+    ]
 
     let output = ""
     broadcastLog(`[MCP Login] 正在认证 "${serverName}"...`)
@@ -1194,6 +1256,10 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
 
       mcpLoginChild.on("exit", (code) => {
         mcpLoginChild = null
+        if (gen !== mcpLoginGeneration) {
+          resolve({ ok: true, output: "" })
+          return
+        }
         if (code === 0) {
           const cfg = getConfig()
           const authData = cfg.workspaceDir ? readMcpAuthFile(cfg.workspaceDir) : {}
@@ -1217,11 +1283,12 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
 
       mcpLoginChild.on("error", (e) => {
         mcpLoginChild = null
+        if (gen !== mcpLoginGeneration) { resolve({ ok: true, output: "" }); return }
         resolve({ ok: false, output: `认证进程错误: ${e.message}` })
       })
 
       setTimeout(() => {
-        if (mcpLoginChild) {
+        if (mcpLoginChild && gen === mcpLoginGeneration) {
           try { mcpLoginChild.kill() } catch { /* ignore */ }
           mcpLoginChild = null
           resolve({ ok: false, output: "认证超时（2分钟）" })

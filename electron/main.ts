@@ -19,6 +19,8 @@ import {
   saveMcpServer,
   deleteMcpServer,
   loginMcpServer,
+  toggleMcpServer,
+  getMcpEnabledMap,
   initDaemonManager,
   cleanupDaemonManager,
 } from "./daemon-manager"
@@ -109,6 +111,8 @@ function registerIpcHandlers(): void {
     return { ok: true }
   })
   ipcMain.handle("mcp:login", (_, name: string) => loginMcpServer(name))
+  ipcMain.handle("mcp:toggle", (_, name: string, enabled: boolean) => toggleMcpServer(name, enabled))
+  ipcMain.handle("mcp:enabled-map", () => getMcpEnabledMap())
 
   ipcMain.handle("rules:list", () => {
     const config = getConfig()

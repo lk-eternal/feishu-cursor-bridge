@@ -56,7 +56,9 @@ export default function App() {
       <div className={page === "dashboard" ? "" : "hidden"}>
         <Dashboard onSettings={() => setPage("settings")} />
       </div>
-      {page === "settings" && <Settings onBack={() => setPage("dashboard")} />}
+      <div className={page === "settings" ? "" : "hidden"}>
+        <Settings onBack={() => setPage("dashboard")} />
+      </div>
     </>
   )
 }

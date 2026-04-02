@@ -57,6 +57,7 @@ export interface McpServerEntry {
   env?: Record<string, string>
   source: "global" | "project"
   authenticated?: boolean
+  enabled?: boolean
 }
 
 const api = {
@@ -85,6 +86,8 @@ const api = {
   saveMcpServer: (name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:save", name, entry, source),
   deleteMcpServer: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:delete", name),
   loginMcp: (name: string): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("mcp:login", name),
+  toggleMcp: (name: string, enabled: boolean): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("mcp:toggle", name, enabled),
+  getMcpEnabledMap: (): Promise<Record<string, boolean>> => ipcRenderer.invoke("mcp:enabled-map"),
   getRules: (): Promise<{ name: string; content: string }[]> => ipcRenderer.invoke("rules:list"),
   saveRule: (name: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:save", name, content),
   deleteRule: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:delete", name),

@@ -29,6 +29,8 @@ interface McpServerEntry {
   env?: Record<string, string>
   source: "global" | "project"
   authenticated?: boolean
+  rawConfig?: Record<string, unknown>
+  enabled?: boolean
 }
 
 interface DaemonStatus {
@@ -70,6 +72,8 @@ interface ElectronAPI {
   saveMcpServer(name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }>
   deleteMcpServer(name: string): Promise<{ ok: boolean }>
   loginMcp(name: string): Promise<{ ok: boolean; output: string }>
+  toggleMcp(name: string, enabled: boolean): Promise<{ ok: boolean; output: string }>
+  getMcpEnabledMap(): Promise<Record<string, boolean>>
   getRules(): Promise<{ name: string; content: string }[]>
   saveRule(name: string, content: string): Promise<{ ok: boolean }>
   deleteRule(name: string): Promise<{ ok: boolean }>
