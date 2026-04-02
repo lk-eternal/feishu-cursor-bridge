@@ -123,9 +123,13 @@ function scheduleTask(task: ScheduledTask): void {
 export function reloadScheduledTasks(): void {
   stopAllJobs()
   const tasks = readTasksFromFile()
-  if (tasks.length === 0) return
+  const enabled = tasks.filter((t) => t.enabled)
+  if (enabled.length === 0) {
+    log(`无活跃定时任务 (共 ${tasks.length} 个, ${tasks.length - enabled.length} 个已禁用)`)
+    return
+  }
 
-  log(`加载 ${tasks.length} 个定时任务`)
+  log(`加载 ${enabled.length} 个定时任务`)
   for (const task of tasks) {
     scheduleTask(task)
   }
@@ -170,12 +174,14 @@ function stopFileWatcher(): void {
 export function startScheduler(): void {
   reloadScheduledTasks()
   startFileWatcher()
+  log(`调度器已启动 (${runningJobs.size} 个活跃任务)`)
 }
 
 export function stopScheduler(): void {
+  const count = runningJobs.size
   stopAllJobs()
   stopFileWatcher()
-  log("调度器已停止")
+  if (count > 0) log(`调度器已停止 (${count} 个任务已取消)`)
 }
 
 export function validateCron(expression: string): boolean {

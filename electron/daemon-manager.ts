@@ -195,8 +195,6 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 
   ensureCliConfig()
 
-  stopScheduler()
-
   const existingStatus = await getDaemonStatus()
   if (existingStatus.running) {
     if (daemonProcess) {
@@ -204,6 +202,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       startScheduler()
       return { ok: true }
     }
+    stopScheduler()
     try {
       const lock = readLockFile()
       if (lock?.port) {
@@ -255,6 +254,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       earlyExit = code
       daemonProcess = null
       cachedPort = null
+      stopScheduler()
       broadcastStatus({ running: false, error: `Daemon 退出 (code=${code})` })
     })
 

@@ -30,14 +30,16 @@ type IdType = "open_id" | "user_id" | "chat_id"
 type Tab = "general" | "proxy" | "mcp" | "rules" | "tasks" | "skills"
 
 interface McpEditForm {
-  name: string; type: "command" | "url"; command: string; args: string
-  url: string; env: string; source: "global" | "project"
+  json: string; source: "global" | "project"; jsonError?: string
 }
 interface RuleFile { name: string; content: string }
 interface SkillFile { name: string; content: string }
 interface TaskItem { id: string; name: string; cron: string; content: string; enabled: boolean }
 
-const emptyMcpForm: McpEditForm = { name: "", type: "command", command: "", args: "", url: "", env: "", source: "global" }
+const MCP_TEMPLATE = JSON.stringify({
+  "my-mcp-server": { command: "npx", args: ["-y", "@some/mcp-server"] },
+}, null, 2)
+const emptyMcpForm: McpEditForm = { json: MCP_TEMPLATE, source: "global" }
 
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "通用", icon: SettingsIcon },
@@ -138,27 +140,32 @@ export default function Settings({ onBack }: Props) {
   const openMcpAdd = () => { setMcpEditOriginalName(null); setMcpEditing({ ...emptyMcpForm }) }
   const openMcpEdit = (s: McpServerEntry) => {
     setMcpEditOriginalName(s.name)
-    const envStr = s.env ? Object.entries(s.env).map(([k, v]) => `${k}=${v}`).join("\n") : ""
-    setMcpEditing({ name: s.name, type: s.type, command: s.command ?? "", args: s.args?.join("\n") ?? "", url: s.url ?? "", env: envStr, source: s.source })
+    const inner: Record<string, unknown> = {}
+    if (s.type === "url") { inner.url = s.url }
+    else { inner.command = s.command; if (s.args?.length) inner.args = s.args }
+    if (s.env && Object.keys(s.env).length > 0) inner.env = s.env
+    setMcpEditing({ json: JSON.stringify({ [s.name]: inner }, null, 2), source: s.source })
   }
   const handleMcpDelete = async (name: string) => { await window.electronAPI.deleteMcpServer(name); refreshMcpServers() }
   const handleMcpSave = async () => {
-    if (!mcpEditing || !mcpEditing.name.trim()) return
-    if (mcpEditOriginalName && mcpEditOriginalName !== mcpEditing.name) await window.electronAPI.deleteMcpServer(mcpEditOriginalName)
-    const entry: Record<string, unknown> = {}
-    if (mcpEditing.type === "url") { entry.url = mcpEditing.url.trim() }
-    else {
-      entry.command = mcpEditing.command.trim()
-      const args = mcpEditing.args.split("\n").map((a) => a.trim()).filter(Boolean)
-      if (args.length > 0) entry.args = args
+    if (!mcpEditing) return
+    let parsed: Record<string, unknown>
+    try { parsed = JSON.parse(mcpEditing.json) }
+    catch { setMcpEditing({ ...mcpEditing, jsonError: "JSON 格式无效" }); return }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      setMcpEditing({ ...mcpEditing, jsonError: "JSON 必须是一个对象" }); return
     }
-    const envLines = mcpEditing.env.split("\n").filter((l) => l.includes("="))
-    if (envLines.length > 0) {
-      const envObj: Record<string, string> = {}
-      for (const line of envLines) { const i = line.indexOf("="); envObj[line.slice(0, i).trim()] = line.slice(i + 1).trim() }
-      entry.env = envObj
+    const keys = Object.keys(parsed)
+    if (keys.length !== 1) {
+      setMcpEditing({ ...mcpEditing, jsonError: "JSON 顶层必须有且仅有一个 key 作为 MCP 名称" }); return
     }
-    await window.electronAPI.saveMcpServer(mcpEditing.name.trim(), entry, mcpEditing.source)
+    const name = keys[0]
+    const entry = parsed[name]
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      setMcpEditing({ ...mcpEditing, jsonError: `"${name}" 的值必须是一个对象` }); return
+    }
+    if (mcpEditOriginalName && mcpEditOriginalName !== name) await window.electronAPI.deleteMcpServer(mcpEditOriginalName)
+    await window.electronAPI.saveMcpServer(name, entry as Record<string, unknown>, mcpEditing.source)
     setMcpEditing(null); refreshMcpServers()
   }
 
@@ -412,28 +419,34 @@ export default function Settings({ onBack }: Props) {
       {/* ═══ MCP Edit Modal ═══ */}
       {mcpEditing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 p-6 shadow-2xl">
-            <div className="mb-4 flex items-center justify-between">
+          <div className="flex w-full max-w-lg flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "80vh" }}>
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
               <h3 className="text-sm font-semibold text-gray-200">{mcpEditOriginalName ? "编辑 MCP" : "新增 MCP"}</h3>
               <button onClick={() => setMcpEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
             </div>
-            <div className="space-y-3">
-              <div><label className="mb-1 block text-xs text-gray-500">名称</label><input type="text" value={mcpEditing.name} onChange={(e) => setMcpEditing({ ...mcpEditing, name: e.target.value })} className={inputCls} placeholder="my-mcp-server" /></div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="mb-1 block text-xs text-gray-500">类型</label><select value={mcpEditing.type} onChange={(e) => setMcpEditing({ ...mcpEditing, type: e.target.value as "command" | "url" })} className={inputCls}><option value="command">命令 (stdio)</option><option value="url">URL (SSE/HTTP)</option></select></div>
-                <div><label className="mb-1 block text-xs text-gray-500">作用域</label><select value={mcpEditing.source} onChange={(e) => setMcpEditing({ ...mcpEditing, source: e.target.value as "global" | "project" })} className={inputCls}><option value="global">全局</option><option value="project">项目</option></select></div>
+            <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
+              <div>
+                <div className="mb-1 flex items-center justify-between">
+                  <label className="text-xs text-gray-500">配置 JSON</label>
+                  <select value={mcpEditing.source} onChange={(e) => setMcpEditing({ ...mcpEditing, source: e.target.value as "global" | "project" })} className="rounded border border-gray-700 bg-gray-900 px-2 py-0.5 text-xs text-gray-400 outline-none focus:border-blue-500">
+                    <option value="global">全局</option><option value="project">项目</option>
+                  </select>
+                </div>
+                <textarea
+                  value={mcpEditing.json}
+                  onChange={(e) => setMcpEditing({ ...mcpEditing, json: e.target.value, jsonError: undefined })}
+                  rows={14}
+                  spellCheck={false}
+                  className={inputCls + " font-mono text-xs leading-relaxed" + (mcpEditing.jsonError ? " border-red-500" : "")}
+                  placeholder={MCP_TEMPLATE}
+                />
+                {mcpEditing.jsonError && <p className="mt-1 text-xs text-red-400">{mcpEditing.jsonError}</p>}
+                <p className="mt-1 text-xs text-gray-600">格式: {"{"} "名称": {"{"} "command"|"url": ... {"}"} {"}"}</p>
               </div>
-              {mcpEditing.type === "url"
-                ? <div><label className="mb-1 block text-xs text-gray-500">URL</label><input type="text" value={mcpEditing.url} onChange={(e) => setMcpEditing({ ...mcpEditing, url: e.target.value })} className={inputCls} placeholder="https://mcp.example.com/sse" /></div>
-                : <>
-                    <div><label className="mb-1 block text-xs text-gray-500">命令</label><input type="text" value={mcpEditing.command} onChange={(e) => setMcpEditing({ ...mcpEditing, command: e.target.value })} className={inputCls} placeholder="npx" /></div>
-                    <div><label className="mb-1 block text-xs text-gray-500">参数（每行一个）</label><textarea value={mcpEditing.args} onChange={(e) => setMcpEditing({ ...mcpEditing, args: e.target.value })} rows={3} className={inputCls + " font-mono text-xs"} placeholder={"-y\n@some/mcp-server"} /></div>
-                  </>}
-              <div><label className="mb-1 block text-xs text-gray-500">环境变量（每行 KEY=VALUE）</label><textarea value={mcpEditing.env} onChange={(e) => setMcpEditing({ ...mcpEditing, env: e.target.value })} rows={2} className={inputCls + " font-mono text-xs"} placeholder="API_KEY=xxx" /></div>
             </div>
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
               <button onClick={() => setMcpEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
-              <button onClick={handleMcpSave} disabled={!mcpEditing.name.trim()} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
+              <button onClick={handleMcpSave} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
             </div>
           </div>
         </div>
