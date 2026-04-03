@@ -274,7 +274,7 @@ function pushMessage(content: string, messageId?: string): void {
   }
   const written = pushToFileQueue(content, messageId, `mcp-${process.pid}`);
   if (written) {
-    log("INFO", `消息已写入共享队列: "${content.slice(0, 60)}" (id=${messageId ?? "none"})`);
+    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"})`);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -294,7 +294,7 @@ function startLarkConnection(): void {
         let text = rawContent;
         try { text = JSON.parse(rawContent)?.text ?? rawContent; } catch { /* use raw */ }
 
-        log("INFO", `收到[${messageType}]: "${text?.slice(0, 80)}" (id=${messageId})`);
+        log("INFO", `收到[${messageType}]: ${JSON.stringify(text ?? "")} (id=${messageId})`);
 
         const senderOpenId = sender?.sender_id?.open_id;
         if (senderOpenId && !resolvedTarget) {
@@ -326,7 +326,7 @@ function startLarkConnection(): void {
 
 // ── MCP Server ──────────────────────────────────────────
 
-const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.4.4", description: "飞书消息桥接 – 通过飞书与用户沟通" });
+const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.4.5", description: "飞书消息桥接 – 通过飞书与用户沟通" });
 
 mcpServer.tool(
   "sync_message",
@@ -375,7 +375,7 @@ export async function main(): Promise<void> {
   }
 
   log("INFO", "════════════════════════════════════════════════");
-  log("INFO", `feishu-cursor-bridge MCP v2.4.4 启动 (PID=${process.pid})`);
+  log("INFO", `feishu-cursor-bridge MCP v2.4.5 启动 (PID=${process.pid})`);
   log("INFO", "════════════════════════════════════════════════");
 
   const queueDir = initFileQueue(APP_ID);

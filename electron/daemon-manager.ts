@@ -1,20 +1,91 @@
-import { spawn, execSync, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync, execSync, exec, type ChildProcess } from "node:child_process"
 import * as http from "node:http"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
+import { promisify } from "node:util"
 import { app, BrowserWindow, ipcMain } from "electron"
-import { getConfig, saveConfig } from "./config-store"
-import { startScheduler, stopScheduler, reloadScheduledTasks, setSchedulerLogger, setPortGetter, validateCron, readTasksFromFile, writeTasksToFile } from "./cron-scheduler"
+import { getConfig, saveConfig, type AppConfig } from "./config-store"
+import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns } from "./cron-scheduler"
+
+const execAsync = promisify(exec)
 
 const LOG_BUFFER_MAX = 300
 const logBuffer: string[] = []
+
+function uiTimestamp(): string {
+  const d = new Date()
+  const p2 = (n: number) => String(n).padStart(2, "0")
+  const p3 = (n: number) => String(n).padStart(3, "0")
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(d.getMilliseconds())}`
+}
+
+/** 单行日志：换行写成字面量 \n，避免打断一行一条记录 */
+function escapeLogContentSingleLine(s: string): string {
+  return s.replace(/\r?\n/g, "\\n")
+}
+
+/** 统一 UI 日志：时间戳 [进程] 等级 内容（空格分隔） */
+function formatUnifiedUiLog(processName: string, level: string, content: string): string {
+  return `${uiTimestamp()} [${processName}] ${level} ${escapeLogContentSingleLine(content)}`
+}
 
 function pushLog(line: string): void {
   logBuffer.push(line)
   if (logBuffer.length > LOG_BUFFER_MAX) logBuffer.splice(0, logBuffer.length - LOG_BUFFER_MAX)
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("daemon:log", line)
+  }
+}
+
+function pushUiLog(processName: string, level: string, content: string): void {
+  pushLog(formatUnifiedUiLog(processName, level, content))
+}
+
+/** 与 daemon stderr 当前格式一致：`时间戳 [LarkDaemon] 等级 内容` */
+const UNIFIED_LARK_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[LarkDaemon\] /
+
+/** 旧版逗号分隔：`时间戳,LarkDaemon,等级,内容` */
+const LEGACY_COMMA_DAEMON = /^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3}),LarkDaemon,(INFO|WARN|ERROR|DEBUG),(.+)$/
+
+function normalizeUnifiedDaemonLine(s: string): string {
+  return s.replace(/^(\d{4}-\d{2}-\d{2})T(\d{2}:)/, "$1 $2")
+}
+
+function pushDaemonStderrLine(rawLine: string): void {
+  const t = rawLine.trim()
+  if (!t) return
+  if (UNIFIED_LARK_DAEMON_PREFIX.test(t)) {
+    pushLog(normalizeUnifiedDaemonLine(t))
+    return
+  }
+  const legacyComma = t.match(LEGACY_COMMA_DAEMON)
+  if (legacyComma) {
+    const ts = legacyComma[1].replace("T", " ")
+    pushLog(`${ts} [LarkDaemon] ${legacyComma[2]} ${legacyComma[3]}`)
+    return
+  }
+  const legacy = t.match(/^\[LarkDaemon\]\[([^\]]+)\]\[([^\]]+)\]\s*(.*)$/)
+  if (legacy) {
+    const ts = legacy[1].replace("T", " ")
+    pushLog(`${ts} [LarkDaemon] ${legacy[2]} ${escapeLogContentSingleLine(legacy[3])}`)
+    return
+  }
+  pushUiLog("LarkDaemon", "WARN", t)
+}
+
+function flushAgentStreamChunk(
+  bufRef: { current: string },
+  chunk: string,
+  stream: "stdout" | "stderr",
+): void {
+  bufRef.current += chunk
+  const parts = bufRef.current.split(/\r?\n/)
+  bufRef.current = parts.pop() ?? ""
+  const level = stream === "stderr" ? "WARN" : "INFO"
+  for (const raw of parts) {
+    const line = raw.trim()
+    if (line) pushUiLog("Agent", level, line)
   }
 }
 
@@ -29,11 +100,17 @@ export interface DaemonStatus {
   agentPid?: number | null
   cliAvailable?: boolean
   error?: string
+  /** 配置中的工作目录与当前仍在运行的 Daemon 实例不一致 */
+  workspaceMismatch?: boolean
+  /** 当前 Daemon 实际使用的工作目录（与设置不一致时有值） */
+  daemonWorkspaceDir?: string
 }
 
 let daemonProcess: ChildProcess | null = null
 let statusInterval: NodeJS.Timeout | null = null
 let cachedPort: number | null = null
+/** 本次由本应用启动成功时 Daemon 所绑定的工作目录（用于目录切换后的状态判断） */
+let activeDaemonWorkspaceDir: string | null = null
 
 function getDaemonEntryPath(): string {
   if (app.isPackaged) {
@@ -101,40 +178,69 @@ function httpPost(url: string, body: object, timeoutMs = 3000): Promise<unknown>
 }
 
 export async function getDaemonStatus(): Promise<DaemonStatus> {
-  const lock = readLockFile()
-  if (!lock?.port) {
-    return { running: false, error: "Daemon 未运行" }
-  }
+  const config = getConfig()
+  const cfgWs = (config.workspaceDir || "").trim()
 
-  try {
-    const health = await httpGet(`http://127.0.0.1:${lock.port}/health`) as Record<string, unknown>
-    if (health.status === "ok") {
-      cachedPort = lock.port
-      const status: DaemonStatus = {
-        running: true,
-        version: health.version as string,
-        uptime: health.uptime as number,
-        queueLength: health.queueLength as number,
-        hasTarget: health.hasTarget as boolean,
-        autoOpenId: health.autoOpenId as string | null,
-        agentRunning: isAgentRunning(),
-        agentPid: agentChild?.pid ?? null,
-        cliAvailable: resolveAgentBinary(),
-      }
-
-      if (status.autoOpenId) {
-        const config = getConfig()
-        if (!config.larkReceiveId) {
-          saveConfig({ larkReceiveId: status.autoOpenId, larkReceiveIdType: "open_id" })
-        }
-      }
-
-      return status
+  const statusFromHealth = (port: number, health: Record<string, unknown>): DaemonStatus => {
+    cachedPort = port
+    const status: DaemonStatus = {
+      running: true,
+      version: health.version as string,
+      uptime: health.uptime as number,
+      queueLength: health.queueLength as number,
+      hasTarget: health.hasTarget as boolean,
+      autoOpenId: health.autoOpenId as string | null,
+      agentRunning: isAgentRunning(),
+      agentPid: agentChild?.pid ?? null,
     }
-    return { running: false, error: "Daemon 健康检查失败" }
-  } catch {
-    return { running: false, error: "Daemon 无法连接" }
+    if (status.autoOpenId && !config.larkReceiveId) {
+      saveConfig({ larkReceiveId: status.autoOpenId, larkReceiveIdType: "open_id" })
+    }
+    return status
   }
+
+  const tryHealth = async (port: number): Promise<DaemonStatus | null> => {
+    try {
+      const health = await httpGet(`http://127.0.0.1:${port}/health`) as Record<string, unknown>
+      if (health.status !== "ok") {
+        return null
+      }
+      return statusFromHealth(port, health)
+    } catch {
+      return null
+    }
+  }
+
+  const lock = readLockFile()
+  if (lock?.port) {
+    const st = await tryHealth(lock.port)
+    if (st) {
+      const mismatch =
+        activeDaemonWorkspaceDir !== null && activeDaemonWorkspaceDir !== cfgWs
+      if (mismatch) {
+        st.workspaceMismatch = true
+        st.daemonWorkspaceDir = activeDaemonWorkspaceDir ?? undefined
+      }
+      return st
+    }
+  }
+
+  if (cachedPort) {
+    const st = await tryHealth(cachedPort)
+    if (st) {
+      const mismatch =
+        !lock?.port ||
+        lock.port !== cachedPort ||
+        (activeDaemonWorkspaceDir !== null && activeDaemonWorkspaceDir !== cfgWs)
+      if (mismatch) {
+        st.workspaceMismatch = true
+        st.daemonWorkspaceDir = activeDaemonWorkspaceDir ?? undefined
+      }
+      return st
+    }
+  }
+
+  return { running: false, error: "Daemon 未运行" }
 }
 
 function ensureCliConfig(): void {
@@ -198,14 +304,13 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   if (existingStatus.running) {
     if (daemonProcess) {
       startStatusPolling()
-      startScheduler()
       return { ok: true }
     }
-    stopScheduler()
     try {
       const lock = readLockFile()
-      if (lock?.port) {
-        await httpPost(`http://127.0.0.1:${lock.port}/shutdown`, {})
+      const portToShutdown = lock?.port ?? cachedPort
+      if (portToShutdown) {
+        await httpPost(`http://127.0.0.1:${portToShutdown}/shutdown`, {})
         await new Promise((r) => setTimeout(r, 1500))
       }
     } catch { /* ignore orphan cleanup */ }
@@ -230,6 +335,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 
     let earlyOutput = ""
     let earlyExit: number | null = null
+    let daemonStdoutBuf = ""
+    let daemonStderrBuf = ""
 
     daemonProcess = spawn(process.execPath, [entryPath], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -238,22 +345,34 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     })
 
     daemonProcess.stdout?.on("data", (d: Buffer) => {
-      const line = d.toString().trim()
-      earlyOutput += line + "\n"
-      if (line && !line.startsWith("[info]:")) pushLog(line)
+      const chunk = d.toString()
+      earlyOutput += chunk
+      daemonStdoutBuf += chunk
+      const parts = daemonStdoutBuf.split(/\r?\n/)
+      daemonStdoutBuf = parts.pop() ?? ""
+      for (const raw of parts) {
+        const line = raw.trim()
+        if (!line || line.startsWith("[info]:")) continue
+        pushUiLog("LarkDaemon", "INFO", line)
+      }
     })
 
     daemonProcess.stderr?.on("data", (d: Buffer) => {
-      const line = d.toString().trim()
-      earlyOutput += line + "\n"
-      if (line) pushLog(`[stderr] ${line}`)
+      const chunk = d.toString()
+      earlyOutput += chunk
+      daemonStderrBuf += chunk
+      const parts = daemonStderrBuf.split(/\r?\n/)
+      daemonStderrBuf = parts.pop() ?? ""
+      for (const raw of parts) {
+        pushDaemonStderrLine(raw)
+      }
     })
 
     daemonProcess.on("exit", (code) => {
       earlyExit = code
       daemonProcess = null
       cachedPort = null
-      stopScheduler()
+      activeDaemonWorkspaceDir = null
       broadcastStatus({ running: false, error: `Daemon 退出 (code=${code})` })
     })
 
@@ -266,9 +385,9 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     }
 
     cachedPort = lock.port
+    activeDaemonWorkspaceDir = config.workspaceDir.trim() || null
     startStatusPolling()
     injectWorkspaceMcpAndRules()
-    startScheduler()
     return { ok: true }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -277,8 +396,8 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 }
 
 export async function stopDaemon(): Promise<void> {
-  stopScheduler()
   stopStatusPolling()
+  stopAgent()
   logBuffer.length = 0
 
   if (cachedPort) {
@@ -297,6 +416,14 @@ export async function stopDaemon(): Promise<void> {
   }
   daemonProcess = null
   cachedPort = null
+  activeDaemonWorkspaceDir = null
+  broadcastStatus({
+    running: false,
+    error: "Daemon 未运行",
+    agentRunning: false,
+    agentPid: null,
+    queueLength: 0,
+  })
 }
 
 function waitForLockFile(timeoutMs: number): Promise<{ port: number } | null> {
@@ -324,8 +451,8 @@ function broadcastStatus(status: DaemonStatus): void {
   }
 }
 
-function broadcastLog(message: string): void {
-  pushLog(`[Electron] ${message}`)
+function broadcastLog(message: string, level: string = "INFO"): void {
+  pushUiLog("Electron", level, message)
 }
 
 const AGENT_STALE_TIMEOUT_MS = 10 * 60 * 1000
@@ -342,7 +469,7 @@ function startStatusPolling(): void {
       if (queueStaleStartTime === null) {
         queueStaleStartTime = Date.now()
       } else if (Date.now() - queueStaleStartTime > AGENT_STALE_TIMEOUT_MS) {
-        broadcastLog(`[防卡死] Agent 运行中但队列消息已 ${Math.round((Date.now() - queueStaleStartTime) / 60_000)} 分钟未消费，自动终止`)
+        broadcastLog(`[防卡死] Agent 运行中但队列消息已 ${Math.round((Date.now() - queueStaleStartTime) / 60_000)} 分钟未消费，自动终止`, "WARN")
         stopAgent()
         queueStaleStartTime = null
       }
@@ -352,10 +479,10 @@ function startStatusPolling(): void {
 
     if (status.running && status.queueLength && status.queueLength > 0 && !isAgentRunning()) {
       await new Promise((r) => setTimeout(r, 1000))
-      const message = await pullMessageFromQueue()
-      if (message) {
-        broadcastLog(`检测到排队消息，自动拉起 Agent`)
-        launchAgent(message)
+      const bundled = await pullMergedMessagesFromQueue()
+      if (bundled) {
+        broadcastLog(`检测到排队消息 ${bundled.count} 条，合并后自动拉起 Agent`)
+        launchAgent(bundled.text)
       }
     }
 
@@ -372,14 +499,29 @@ function stopStatusPolling(): void {
   }
 }
 
-async function pullMessageFromQueue(): Promise<string | null> {
+/**
+ * 一次性取出当前队列中全部消息并合并为一段文本（多条的格式便于 Agent 分批处理）。
+ */
+async function pullMergedMessagesFromQueue(): Promise<{ text: string; count: number } | null> {
   const lock = readLockFile()
   if (!lock?.port) return null
   try {
-    const res = await httpGet(`http://127.0.0.1:${lock.port}/dequeue`) as {
-      message?: string | null
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/dequeue-all`, {}, 10_000)) as {
+      messages?: string[]
+    } | null
+    const msgs = res?.messages ?? []
+    if (msgs.length === 0) {
+      return null
     }
-    return res.message ?? null
+    const trimmed = msgs.map((t) => (typeof t === "string" ? t.trim() : "")).filter((t) => t.length > 0)
+    if (trimmed.length === 0) {
+      return null
+    }
+    const text =
+      trimmed.length === 1
+        ? trimmed[0]
+        : trimmed.map((t, i) => `【消息 ${i + 1}】\n${t}`).join("\n\n")
+    return { text, count: trimmed.length }
   } catch {
     return null
   }
@@ -453,15 +595,62 @@ function refreshPath(): void {
   }
 }
 
-export function checkCliInstalled(): boolean {
-  if (resolveAgentBinary()) return true
-  refreshPath()
-  try {
-    execSync("agent --version", { stdio: "ignore", timeout: 5000 })
-    return true
-  } catch {
-    return false
+async function refreshPathAsync(): Promise<void> {
+  if (os.platform() === "win32") {
+    try {
+      const { stdout } = await execAsync(
+        'powershell -NoProfile -Command "[System.Environment]::GetEnvironmentVariable(\'Path\',\'Machine\') + \';\' + [System.Environment]::GetEnvironmentVariable(\'Path\',\'User\')"',
+        { timeout: 5000, maxBuffer: 2_000_000 },
+      )
+      const freshPath = String(stdout ?? "").trim()
+      if (freshPath) process.env.PATH = freshPath
+    } catch { /* ignore */ }
+  } else {
+    try {
+      const shell = process.env.SHELL || "/bin/zsh"
+      const { stdout } = await execAsync(`${shell} -ilc 'echo $PATH'`, {
+        timeout: 5000,
+        maxBuffer: 2_000_000,
+      })
+      const freshPath = String(stdout ?? "").trim()
+      if (freshPath) process.env.PATH = freshPath
+    } catch { /* ignore */ }
   }
+}
+
+/**
+ * 异步检测 CLI，避免主进程 execSync/spawnSync 阻塞窗口与 IPC。
+ */
+export async function checkCliInstalled(): Promise<boolean> {
+  if (resolveAgentBinary()) return true
+  await refreshPathAsync()
+  if (resolveAgentBinary()) return true
+  return new Promise((resolve) => {
+    let settled = false
+    const child = spawn("agent", ["--version"], {
+      stdio: "ignore",
+      shell: process.platform === "win32",
+      windowsHide: true,
+    })
+    const t = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill() } catch { /* ignore */ }
+      resolve(false)
+    }, 5000)
+    child.on("error", () => {
+      if (settled) return
+      settled = true
+      clearTimeout(t)
+      resolve(false)
+    })
+    child.on("close", (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(t)
+      resolve(code === 0)
+    })
+  })
 }
 
 export async function installCli(): Promise<{ ok: boolean; output: string }> {
@@ -486,14 +675,16 @@ export async function installCli(): Promise<{ ok: boolean; output: string }> {
 
     child.on("exit", (code) => {
       if (code === 0) {
-        refreshPath()
-        const installed = resolveAgentBinary() || checkCliInstalled()
-        resolve({
-          ok: installed,
-          output: installed
-            ? "CLI 安装成功！请点击「登录授权」完成 Cursor 账号认证。"
-            : output || "安装脚本执行完毕，但 agent 命令仍不可用。请重新打开终端后重试。",
-        })
+        void (async () => {
+          await refreshPathAsync()
+          const installed = resolveAgentBinary() || (await checkCliInstalled())
+          resolve({
+            ok: installed,
+            output: installed
+              ? "CLI 安装成功！请点击「登录授权」完成 Cursor 账号认证。"
+              : output || "安装脚本执行完毕，但 agent 命令仍不可用。请重新打开终端后重试。",
+          })
+        })()
       } else {
         resolve({ ok: false, output: output || `安装失败 (exit code: ${code})` })
       }
@@ -505,18 +696,15 @@ export async function installCli(): Promise<{ ok: boolean; output: string }> {
   })
 }
 
-export function loginCli(): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
-    if (!resolveAgentBinary()) {
-      refreshPath()
-      try {
-        execSync("agent --version", { stdio: "ignore", timeout: 5000 })
-      } catch {
-        resolve({ ok: false, output: "Cursor CLI 未安装，请先安装" })
-        return
-      }
+export async function loginCli(): Promise<{ ok: boolean; output: string }> {
+  if (!resolveAgentBinary()) {
+    await refreshPathAsync()
+    if (!(await checkCliInstalled())) {
+      return { ok: false, output: "Cursor CLI 未安装，请先安装" }
     }
+  }
 
+  return new Promise((resolve) => {
     const config = getConfig()
     const args = ["login"]
 
@@ -548,13 +736,13 @@ export function loginCli(): Promise<{ ok: boolean; output: string }> {
       child.stdout?.on("data", (d: Buffer) => {
         const s = d.toString().trim()
         output += s + "\n"
-        if (s) broadcastLog(`[CLI Login] ${s.slice(0, 300)}`)
+        if (s) broadcastLog(`[CLI Login] ${s}`, "INFO")
       })
 
       child.stderr?.on("data", (d: Buffer) => {
         const s = d.toString().trim()
         output += s + "\n"
-        if (s) broadcastLog(`[CLI Login:err] ${s.slice(0, 300)}`)
+        if (s) broadcastLog(`[CLI Login:err] ${s}`, "ERROR")
       })
 
       child.on("exit", (code) => {
@@ -650,7 +838,7 @@ export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean 
     mcpOk = true
     broadcastLog(`MCP 配置已${targetPath === projectMcpJsonPath ? "注入" : "更新"}: ${targetPath}`)
   } catch (e: unknown) {
-    broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`)
+    broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
   }
 
   let ruleOk = false
@@ -702,7 +890,7 @@ export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean 
     ruleOk = true
     broadcastLog(`规则已注入: ${rulePath}`)
   } catch (e: unknown) {
-    broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`)
+    broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
   }
 
   return { mcpOk, ruleOk }
@@ -715,6 +903,9 @@ let agentNodePath = ""
 let agentIndexPath = ""
 let lastAgentLaunchTime = 0
 const AGENT_COOLDOWN_MS = 15_000
+
+/** 工作区从未对话过时，`agent --continue` 会输出并退出 */
+const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 function resolveAgentBinary(): boolean {
   const isWin = process.platform === "win32"
@@ -737,8 +928,283 @@ function resolveAgentBinary(): boolean {
   } catch { return false }
 }
 
+export type ExecAgentSyncOptions = { timeoutMs?: number; cwd?: string }
+
+/**
+ * 与 launchAgent 相同方式解析 Cursor CLI；主进程环境常无 agent 在 PATH（尤其 Windows），需走 node.exe + index.js。
+ */
+export function execAgentSync(
+  agentArgs: string[],
+  env: Record<string, string>,
+  timeoutOrOpts: number | ExecAgentSyncOptions = 30_000,
+): { ok: boolean; stdout: string; stderr: string; error?: string } {
+  const opts: ExecAgentSyncOptions =
+    typeof timeoutOrOpts === "number" ? { timeoutMs: timeoutOrOpts } : timeoutOrOpts
+  const timeoutMs = opts.timeoutMs ?? 30_000
+  const cwd = opts.cwd
+  if (!resolveAgentBinary()) {
+    refreshPath()
+    if (!resolveAgentBinary()) {
+      return { ok: false, stdout: "", stderr: "", error: "未找到 Cursor CLI（agent），请先安装并完成登录" }
+    }
+  }
+  const mergedEnv = { ...process.env as Record<string, string>, ...env }
+  if (agentNodePath && agentIndexPath) {
+    const r = spawnSync(agentNodePath, [agentIndexPath, ...agentArgs], {
+      encoding: "utf-8",
+      timeout: timeoutMs,
+      env: mergedEnv,
+      windowsHide: true,
+      cwd,
+    })
+    const stdout = r.stdout == null ? "" : String(r.stdout)
+    const stderr = r.stderr == null ? "" : String(r.stderr)
+    if (r.error) {
+      return { ok: false, stdout, stderr, error: r.error.message }
+    }
+    if (r.status !== 0) {
+      const hint = (stderr || stdout).trim().slice(0, 500) || `进程退出码 ${r.status}`
+      return { ok: false, stdout, stderr, error: hint }
+    }
+    return { ok: true, stdout, stderr }
+  }
+  const r = spawnSync("agent", agentArgs, {
+    encoding: "utf-8",
+    timeout: timeoutMs,
+    env: mergedEnv,
+    shell: process.platform === "win32",
+    windowsHide: true,
+    cwd,
+  })
+  const stdout = r.stdout == null ? "" : String(r.stdout)
+  const stderr = r.stderr == null ? "" : String(r.stderr)
+  if (r.error) {
+    return { ok: false, stdout, stderr, error: r.error.message }
+  }
+  if (r.status !== 0) {
+    const hint = (stderr || stdout).trim().slice(0, 500) || `进程退出码 ${r.status}`
+    return { ok: false, stdout, stderr, error: hint }
+  }
+  return { ok: true, stdout, stderr }
+}
+
+/**
+ * 与 execAgentSync 相同逻辑，异步 spawn，不阻塞主进程事件循环。
+ */
+export async function execAgentAsync(
+  agentArgs: string[],
+  env: Record<string, string>,
+  timeoutOrOpts: number | ExecAgentSyncOptions = 30_000,
+): Promise<{ ok: boolean; stdout: string; stderr: string; error?: string }> {
+  const opts: ExecAgentSyncOptions =
+    typeof timeoutOrOpts === "number" ? { timeoutMs: timeoutOrOpts } : timeoutOrOpts
+  const timeoutMs = opts.timeoutMs ?? 30_000
+  const cwd = opts.cwd
+
+  if (!resolveAgentBinary()) {
+    await refreshPathAsync()
+    if (!resolveAgentBinary()) {
+      return { ok: false, stdout: "", stderr: "", error: "未找到 Cursor CLI（agent），请先安装并完成登录" }
+    }
+  }
+
+  const mergedEnv = { ...process.env as Record<string, string>, ...env }
+
+  return new Promise((resolve) => {
+    let settled = false
+    let timer: NodeJS.Timeout | undefined
+    const finish = (r: { ok: boolean; stdout: string; stderr: string; error?: string }) => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) {
+        clearTimeout(timer)
+      }
+      resolve(r)
+    }
+
+    let child: ChildProcess
+    if (agentNodePath && agentIndexPath) {
+      child = spawn(agentNodePath, [agentIndexPath, ...agentArgs], {
+        env: mergedEnv,
+        windowsHide: true,
+        cwd,
+      })
+    } else {
+      child = spawn("agent", agentArgs, {
+        env: mergedEnv,
+        shell: process.platform === "win32",
+        windowsHide: true,
+        cwd,
+      })
+    }
+
+    let stdout = ""
+    let stderr = ""
+    timer = setTimeout(() => {
+      try { child.kill("SIGTERM") } catch { /* ignore */ }
+      finish({ ok: false, stdout, stderr, error: "命令超时" })
+    }, timeoutMs)
+
+    child.stdout?.on("data", (d: Buffer) => {
+      stdout += d.toString()
+    })
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString()
+    })
+    child.on("error", (e) => {
+      finish({ ok: false, stdout, stderr, error: e.message })
+    })
+    child.on("close", (code) => {
+      if (code === 0) {
+        finish({ ok: true, stdout, stderr })
+        return
+      }
+      const hint = (stderr || stdout).trim().slice(0, 500) || `进程退出码 ${code}`
+      finish({ ok: false, stdout, stderr, error: hint })
+    })
+  })
+}
+
+export type AgentLoginStatus = {
+  cliFound: boolean
+  loggedIn: boolean
+  identityLine?: string
+  error?: string
+}
+
+/**
+ * 通过 `agent whoami` 判断是否已登录（成功时 stdout 通常含 Logged in as ...）。
+ */
+export async function checkAgentLoggedIn(): Promise<AgentLoginStatus> {
+  if (!resolveAgentBinary()) {
+    await refreshPathAsync()
+    if (!resolveAgentBinary()) {
+      return { cliFound: false, loggedIn: false, error: "未找到 Cursor CLI（agent）" }
+    }
+  }
+  const config = getConfig()
+  const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
+  applyProxyEnv(env, config)
+  const workspaceCwd = config.workspaceDir?.trim() || undefined
+  const r = await execAgentAsync(["whoami"], env, { timeoutMs: 15_000, cwd: workspaceCwd })
+  const out = r.stdout.trim()
+  const err = r.stderr.trim()
+  if (r.ok) {
+    const loggedIn = /logged\s+in/i.test(out) || /✓\s*Logged/i.test(out)
+    const firstLine = out
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.length > 0)
+    return {
+      cliFound: true,
+      loggedIn,
+      identityLine: firstLine,
+      error: loggedIn ? undefined : (out || err || "未识别登录状态").slice(0, 400),
+    }
+  }
+  const combined = (out || err || r.error || "").trim().slice(0, 500)
+  return { cliFound: true, loggedIn: false, error: combined }
+}
+
 function isAgentRunning(): boolean {
   return agentChild !== null && !agentChild.killed && agentChild.exitCode === null
+}
+
+function buildAgentLaunchArgs(config: AppConfig, prompt: string, includeContinue: boolean): string[] {
+  const args = [
+    "--print",
+    "--force",
+    ...(includeContinue ? ["--continue"] : []),
+    "--approve-mcps",
+    "--workspace",
+    config.workspaceDir,
+    "--trust",
+  ]
+  if (config.model && config.model !== "auto") {
+    args.push("--model", config.model)
+  }
+  args.push(prompt)
+  return args
+}
+
+/**
+ * 启动 agent 子进程；若因无历史会话导致 --continue 失败，自动去掉 --continue 再启动一次。
+ */
+function startAgentChildProcess(
+  args: string[],
+  spawnEnv: Record<string, string>,
+  canRetryWithoutContinue: boolean,
+): { ok: boolean; error?: string } {
+  let stdoutAcc = ""
+  let stderrAcc = ""
+  const agentOutBuf = { current: "" }
+  const agentErrBuf = { current: "" }
+
+  try {
+    let child: ChildProcess
+    if (agentNodePath && agentIndexPath) {
+      broadcastLog(`Agent 启动: ${agentNodePath} ${path.basename(agentIndexPath)}`)
+      child = spawn(agentNodePath, [agentIndexPath, ...args], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: spawnEnv,
+      })
+    } else {
+      broadcastLog("Agent 启动: agent command")
+      child = spawn("agent", args, {
+        shell: process.platform === "win32",
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: spawnEnv,
+      })
+    }
+
+    agentChild = child
+
+    child.stdout?.on("data", (d: Buffer) => {
+      const chunk = d.toString()
+      stdoutAcc += chunk
+      flushAgentStreamChunk(agentOutBuf, chunk, "stdout")
+    })
+    child.stderr?.on("data", (d: Buffer) => {
+      const chunk = d.toString()
+      stderrAcc += chunk
+      flushAgentStreamChunk(agentErrBuf, chunk, "stderr")
+    })
+    child.on("close", (code, signal) => {
+      const combined = stdoutAcc + stderrAcc
+      if (agentOutBuf.current.trim()) {
+        pushUiLog("Agent", "INFO", agentOutBuf.current.trim())
+        agentOutBuf.current = ""
+      }
+      if (agentErrBuf.current.trim()) {
+        pushUiLog("Agent", "WARN", agentErrBuf.current.trim())
+        agentErrBuf.current = ""
+      }
+      const hadContinue = args.includes("--continue")
+      if (canRetryWithoutContinue && hadContinue && AGENT_NO_PREVIOUS_CHATS.test(combined)) {
+        broadcastLog("[Agent] 检测到无历史会话，已去掉 --continue 并重新启动", "INFO")
+        agentChild = null
+        const argsWithoutContinue = args.filter((a) => a !== "--continue")
+        startAgentChildProcess(argsWithoutContinue, spawnEnv, false)
+        return
+      }
+      const sig = signal ? ` signal=${signal}` : ""
+      pushUiLog("Agent", "INFO", `退出 code=${code}${sig}`)
+      agentChild = null
+    })
+    child.on("error", (e) => {
+      pushUiLog("Agent", "ERROR", `进程错误: ${e.message}`)
+      agentChild = null
+    })
+
+    broadcastLog(`Agent 已启动, pid=${child.pid}`)
+    return { ok: true }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    broadcastLog(`[Agent] 启动失败: ${msg}`, "ERROR")
+    return { ok: false, error: msg }
+  }
 }
 
 export function launchAgent(initialMessage?: string): { ok: boolean; error?: string } {
@@ -756,61 +1222,14 @@ export function launchAgent(initialMessage?: string): { ok: boolean; error?: str
   const prompt = initialMessage
     ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是用户通过飞书发来的消息，请直接处理，不要发送问候语：\n\n${initialMessage}`
     : "请遵守飞书工作流规则feishu-cursor-bridge开始工作,先获取待处理的飞书消息，然后根据消息内容开始工作。不要发送问候消息。"
-  const args = [
-    "--print", 
-    "--force", 
-    ...(config.agentNewSession ? [] : ["--continue"]),
-    "--approve-mcps",
-    "--workspace", config.workspaceDir,
-    "--trust",
-  ]
-  if (config.model && config.model !== "auto") args.push("--model", config.model)
-  args.push(prompt)
+  const includeContinue = !config.agentNewSession
+  const args = buildAgentLaunchArgs(config, prompt, includeContinue)
 
   const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent" }
   delete spawnEnv.NODE_USE_ENV_PROXY
   applyProxyEnv(spawnEnv, config)
 
-  try {
-    if (agentNodePath && agentIndexPath) {
-      broadcastLog(`Agent 启动: ${agentNodePath} ${path.basename(agentIndexPath)}`)
-      agentChild = spawn(agentNodePath, [agentIndexPath, ...args], {
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: spawnEnv,
-      })
-    } else {
-      broadcastLog("Agent 启动: agent command")
-      agentChild = spawn("agent", args, {
-        shell: process.platform === "win32",
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: spawnEnv,
-      })
-    }
-
-    agentChild.stdout?.on("data", (d: Buffer) => {
-      const s = d.toString().trim()
-      if (s) pushLog(`[Agent] ${s}`)
-    })
-    agentChild.stderr?.on("data", (d: Buffer) => {
-      const s = d.toString().trim()
-      if (s) pushLog(`[Agent:err] ${s}`)
-    })
-    agentChild.on("exit", (code) => {
-      pushLog(`[Agent] 退出 code=${code}`)
-      agentChild = null
-    })
-    agentChild.on("error", (e) => {
-      pushLog(`[Agent] 错误: ${e.message}`)
-      agentChild = null
-    })
-
-    broadcastLog(`Agent 已启动, pid=${agentChild.pid}`)
-    return { ok: true }
-  } catch (e: unknown) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) }
-  }
+  return startAgentChildProcess(args, spawnEnv, includeContinue)
 }
 
 export function stopAgent(): void {
@@ -828,7 +1247,7 @@ async function reportCommandResult(port: number, messageId: string, ok: boolean,
   try {
     await httpPost(`http://127.0.0.1:${port}/cmd/result`, { messageId, ok, message })
   } catch (e: unknown) {
-    broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`)
+    broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
 }
 
@@ -910,7 +1329,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           await stopDaemon()
           await new Promise((r) => setTimeout(r, 1500))
           const result = await startDaemon()
-          if (!result.ok) broadcastLog(`[指令] Daemon 重启失败: ${result.error}`)
+          if (!result.ok) broadcastLog(`[指令] Daemon 重启失败: ${result.error}`, "ERROR")
           break
         }
 
@@ -932,7 +1351,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           await reportCommandResult(lock.port, claimed.messageId, false, `未知指令: ${claimed.command}`)
       }
     } catch (e: unknown) {
-      broadcastLog(`[指令] ${claimed.command} 执行异常: ${e instanceof Error ? e.message : e}`)
+      broadcastLog(`[指令] ${claimed.command} 执行异常: ${e instanceof Error ? e.message : e}`, "ERROR")
       try { await reportCommandResult(lock.port, claimed.messageId, false, `执行异常: ${e instanceof Error ? e.message : e}`) } catch { /* ignore */ }
     }
   }
@@ -1074,7 +1493,7 @@ export async function toggleMcpServer(serverName: string, enabled: boolean): Pro
   try {
     const r = await spawnAsync(["mcp", sub, serverName], config.workspaceDir, env)
     const out = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "").trim()
-    broadcastLog(`[MCP ${sub}] ${serverName}: ${out.slice(0, 200)}`)
+    broadcastLog(`[MCP ${sub}] ${serverName}: ${out}`, r.code === 0 ? "INFO" : "WARN")
     return { ok: r.code === 0, output: out }
   } catch (e: unknown) {
     return { ok: false, output: e instanceof Error ? e.message : String(e) }
@@ -1211,9 +1630,10 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
     // 先 enable 再 login（异步）
     try {
       const er = await spawnAsync(["mcp", "enable", serverName], config.workspaceDir, spawnEnv)
-      broadcastLog(`[MCP Enable] "${serverName}": ${(er.stdout + er.stderr).trim().slice(0, 200) || "已启用"}`)
+      const enOut = (er.stdout + er.stderr).trim()
+      broadcastLog(`[MCP Enable] "${serverName}": ${enOut || "已启用"}`, er.code === 0 ? "INFO" : "WARN")
     } catch (e: unknown) {
-      broadcastLog(`[MCP Enable] 启用失败: ${e instanceof Error ? e.message : e}`)
+      broadcastLog(`[MCP Enable] 启用失败: ${e instanceof Error ? e.message : e}`, "ERROR")
     }
 
     const args = [
@@ -1245,13 +1665,13 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
       mcpLoginChild.stdout?.on("data", (d: Buffer) => {
         const s = d.toString().trim()
         output += s + "\n"
-        if (s) broadcastLog(`[MCP Login] ${s.slice(0, 300)}`)
+        if (s) broadcastLog(`[MCP Login] ${s}`, "INFO")
       })
 
       mcpLoginChild.stderr?.on("data", (d: Buffer) => {
         const s = d.toString().trim()
         output += s + "\n"
-        if (s) broadcastLog(`[MCP Login:err] ${s.slice(0, 300)}`)
+        if (s) broadcastLog(`[MCP Login:err] ${s}`, "ERROR")
       })
 
       mcpLoginChild.on("exit", (code) => {
@@ -1301,9 +1721,81 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
   })
 }
 
+export interface ConfigSaveResult {
+  ok: boolean
+  /** 需在渲染进程展示自定义弹窗后，由用户选择「重启」或「保持」 */
+  needWorkspaceDaemonChoice?: boolean
+  oldWorkspaceDir?: string
+  newWorkspaceDir?: string
+  /** 因目录冲突未写入 store，完成向导需在重启成功后补写 */
+  deferredSetupComplete?: boolean
+  restartFailed?: string
+  /** 本次已将工作目录写入配置（非「待确认重启」分支）；渲染进程应刷新依赖工作区的数据（如 MCP 列表与启用状态） */
+  workspaceDirChanged?: boolean
+}
+
+/**
+ * 在新工作目录下保存并重启 Daemon（由渲染进程在确认后调用）。
+ */
+export async function applyWorkspaceDirRestart(workspaceDir: string): Promise<{ ok: boolean; error?: string }> {
+  const w = workspaceDir.trim()
+  if (!w) {
+    return { ok: false, error: "工作目录为空" }
+  }
+  saveConfig({ workspaceDir: w })
+  await stopDaemon()
+  const started = await startDaemon()
+  broadcastStatus(await getDaemonStatus())
+  if (!started.ok) {
+    return { ok: false, error: started.error ?? "Daemon 启动失败" }
+  }
+  return { ok: true }
+}
+
+/**
+ * 保存配置；若正在修改工作目录且 Daemon 在运行，交由渲染进程展示与主页风格一致的确认弹窗。
+ */
+export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Promise<ConfigSaveResult> {
+  const current = getConfig()
+  const oldW = (current.workspaceDir || "").trim()
+  const nextW = partial.workspaceDir !== undefined ? partial.workspaceDir.trim() : oldW
+  const workspaceChanging = partial.workspaceDir !== undefined && nextW !== oldW && oldW !== ""
+
+  if (workspaceChanging) {
+    const st = await getDaemonStatus()
+    if (st.running) {
+      const deferredSc = partial.setupComplete === true
+      const rest: Partial<AppConfig> = { ...partial }
+      delete (rest as Record<string, unknown>).workspaceDir
+      if (deferredSc) {
+        delete (rest as Record<string, unknown>).setupComplete
+      }
+      saveConfig({ ...rest, workspaceDir: oldW })
+      broadcastStatus(await getDaemonStatus())
+      return {
+        ok: true,
+        needWorkspaceDaemonChoice: true,
+        oldWorkspaceDir: oldW,
+        newWorkspaceDir: nextW,
+        deferredSetupComplete: deferredSc,
+      }
+    }
+  }
+
+  const workspaceDirChanged =
+    partial.workspaceDir !== undefined && nextW !== oldW
+
+  saveConfig(partial)
+  return {
+    ok: true,
+    ...(workspaceDirChanged ? { workspaceDirChanged: true } : {}),
+  }
+}
+
 // ── 初始化 ───────────────────────────────────────────────
 
 export function initDaemonManager(): void {
+  ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:launch", () => launchAgent())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
@@ -1313,30 +1805,29 @@ export function initDaemonManager(): void {
   })
   ipcMain.handle("scheduled-tasks:save", (_, tasks) => {
     writeTasksToFile(tasks)
-    reloadScheduledTasks()
     return { ok: true }
   })
   ipcMain.handle("scheduled-tasks:validate-cron", (_, expression: string) => {
     return validateCron(expression)
   })
-
-  setSchedulerLogger(broadcastLog)
-  setPortGetter(() => cachedPort)
+  ipcMain.handle("scheduled-tasks:preview-cron", (_, expression: string) => {
+    return previewCronNextRuns(expression)
+  })
 
   getDaemonStatus().then((status) => {
     if (status.running) {
       startStatusPolling()
-      startScheduler()
     }
   })
 }
 
 export function cleanupDaemonManager(): void {
-  stopScheduler()
   stopStatusPolling()
   stopAgent()
   if (daemonProcess) {
     try { daemonProcess.kill() } catch { /* ignore */ }
     daemonProcess = null
   }
+  cachedPort = null
+  activeDaemonWorkspaceDir = null
 }

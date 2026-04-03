@@ -13,6 +13,7 @@ export interface AppConfig {
   httpsProxy: string
   noProxy: string
   agentNewSession: boolean
+  closeWindowAction: "ask" | "minimize" | "quit"
 }
 
 export interface DaemonStatus {
@@ -27,6 +28,18 @@ export interface DaemonStatus {
   model?: string
   cliAvailable?: boolean
   error?: string
+  workspaceMismatch?: boolean
+  daemonWorkspaceDir?: string
+}
+
+export interface ConfigSaveResult {
+  ok: boolean
+  needWorkspaceDaemonChoice?: boolean
+  oldWorkspaceDir?: string
+  newWorkspaceDir?: string
+  deferredSetupComplete?: boolean
+  restartFailed?: string
+  workspaceDirChanged?: boolean
 }
 
 export interface ScheduledTask {
@@ -49,6 +62,13 @@ export interface McpAuthInfo {
   authenticated: boolean
 }
 
+export interface CliLoginStatus {
+  cliFound: boolean
+  loggedIn: boolean
+  identityLine?: string
+  error?: string
+}
+
 export interface McpServerEntry {
   name: string
   type: "command" | "url"
@@ -63,7 +83,11 @@ export interface McpServerEntry {
 
 const api = {
   getConfig: (): Promise<AppConfig> => ipcRenderer.invoke("config:get"),
-  saveConfig: (config: Partial<AppConfig>): Promise<void> => ipcRenderer.invoke("config:save", config),
+  saveConfig: (config: Partial<AppConfig>): Promise<ConfigSaveResult> => ipcRenderer.invoke("config:save", config),
+  applyWorkspaceDaemonRestart: (workspaceDir: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("config:apply-workspace-restart", workspaceDir),
+  respondWindowClose: (payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void> =>
+    ipcRenderer.invoke("window:close-confirm-result", payload),
   selectDirectory: (): Promise<string | null> => ipcRenderer.invoke("dialog:selectDirectory"),
   injectWorkspace: (): Promise<{ results: InjectResult[] }> => ipcRenderer.invoke("workspace:inject"),
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
@@ -76,12 +100,15 @@ const api = {
   clearLogs: (): Promise<void> => ipcRenderer.invoke("logs:clear"),
   getQueueMessages: (): Promise<{ index: number; preview: string }[]> => ipcRenderer.invoke("daemon:queue"),
   checkCli: (): Promise<boolean> => ipcRenderer.invoke("cli:check"),
+  checkCliLogin: (): Promise<CliLoginStatus> => ipcRenderer.invoke("cli:login-status"),
   installCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:install"),
   loginCli: (): Promise<{ ok: boolean; output: string }> => ipcRenderer.invoke("cli:login"),
   listModels: (): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }> => ipcRenderer.invoke("models:list"),
   getScheduledTasks: (): Promise<ScheduledTask[]> => ipcRenderer.invoke("scheduled-tasks:get"),
   saveScheduledTasks: (tasks: ScheduledTask[]): Promise<{ ok: boolean }> => ipcRenderer.invoke("scheduled-tasks:save", tasks),
   validateCron: (expression: string): Promise<boolean> => ipcRenderer.invoke("scheduled-tasks:validate-cron", expression),
+  previewCronNextRuns: (expression: string): Promise<{ ok: true; runs: string[] } | { ok: false; error: string }> =>
+    ipcRenderer.invoke("scheduled-tasks:preview-cron", expression),
   getOAuthMcps: (): Promise<McpAuthInfo[]> => ipcRenderer.invoke("mcp:list-oauth"),
   getMcpServers: (): Promise<McpServerEntry[]> => ipcRenderer.invoke("mcp:list-all"),
   saveMcpServer: (name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }> => ipcRenderer.invoke("mcp:save", name, entry, source),
@@ -109,6 +136,11 @@ const api = {
     const handler = (_: unknown, line: string) => cb(line)
     ipcRenderer.on("daemon:log", handler)
     return () => ipcRenderer.removeListener("daemon:log", handler)
+  },
+  onWindowCloseConfirm: (cb: () => void) => {
+    const handler = () => cb()
+    ipcRenderer.on("window:close-confirm", handler)
+    return () => ipcRenderer.removeListener("window:close-confirm", handler)
   },
 }
 

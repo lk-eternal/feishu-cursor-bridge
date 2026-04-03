@@ -1,6 +1,6 @@
 {
   "name": "feishu-cursor-bridge",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "description": "Feishu Cursor Bridge - 飞书 × Cursor 远程协作桌面应用",
   "keywords": [
     "mcp",
@@ -32,6 +32,7 @@
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "cron-parser": "^5.5.0",
     "electron-store": "^11.0.2",
     "lucide-react": "^0.577.0",
     "node-cron": "^4.2.1",

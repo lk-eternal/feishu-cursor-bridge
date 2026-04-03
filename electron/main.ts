@@ -2,7 +2,6 @@ import { app, BrowserWindow, ipcMain, dialog, shell } from "electron"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
-import { execSync } from "node:child_process"
 import { getConfig, saveConfig } from "./config-store"
 import {
   startDaemon,
@@ -12,6 +11,7 @@ import {
   clearLogs,
   getQueueMessages,
   checkCliInstalled,
+  checkAgentLoggedIn,
   installCli,
   loginCli,
   getOAuthMcpList,
@@ -21,13 +21,44 @@ import {
   loginMcpServer,
   toggleMcpServer,
   getMcpEnabledMap,
+  execAgentSync,
   initDaemonManager,
   cleanupDaemonManager,
+  saveAppConfigFromRenderer,
 } from "./daemon-manager"
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
 
 let mainWindow: BrowserWindow | null = null
+let closeConfirmDialogOpen = false
+
+function installWindowCloseHandler(win: BrowserWindow): void {
+  win.on("close", (e) => {
+    if (isQuitting) {
+      return
+    }
+
+    const pref = getConfig().closeWindowAction
+
+    if (pref === "minimize") {
+      e.preventDefault()
+      win.hide()
+      return
+    }
+
+    if (pref === "quit") {
+      isQuitting = true
+      return
+    }
+
+    e.preventDefault()
+    if (closeConfirmDialogOpen) {
+      return
+    }
+    closeConfirmDialogOpen = true
+    win.webContents.send("window:close-confirm")
+  })
+}
 
 function createWindow(): void {
   const iconPath = app.isPackaged
@@ -54,12 +85,7 @@ function createWindow(): void {
     mainWindow?.show()
   })
 
-  mainWindow.on("close", (e) => {
-    if (!isQuitting) {
-      e.preventDefault()
-      mainWindow?.hide()
-    }
-  })
+  installWindowCloseHandler(mainWindow)
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
@@ -79,7 +105,32 @@ function createWindow(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle("config:get", () => getConfig())
-  ipcMain.handle("config:save", (_, config) => saveConfig(config))
+  ipcMain.handle("config:save", (_, config) => saveAppConfigFromRenderer(config))
+
+  ipcMain.handle(
+    "window:close-confirm-result",
+    (_, payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }) => {
+      const win = mainWindow
+      closeConfirmDialogOpen = false
+      if (!win || win.isDestroyed()) {
+        return
+      }
+      if (payload.action === "cancel") {
+        return
+      }
+      if (payload.remember) {
+        saveConfig({
+          closeWindowAction: payload.action === "minimize" ? "minimize" : "quit",
+        })
+      }
+      if (payload.action === "minimize") {
+        win.hide()
+        return
+      }
+      isQuitting = true
+      win.close()
+    },
+  )
 
   ipcMain.handle("dialog:selectDirectory", async () => {
     if (!mainWindow) return null
@@ -98,6 +149,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("logs:clear", () => clearLogs())
   ipcMain.handle("daemon:queue", () => getQueueMessages())
   ipcMain.handle("cli:check", () => checkCliInstalled())
+  ipcMain.handle("cli:login-status", () => checkAgentLoggedIn())
   ipcMain.handle("cli:install", () => installCli())
   ipcMain.handle("cli:login", () => loginCli())
   ipcMain.handle("mcp:list-oauth", () => getOAuthMcpList())
@@ -172,43 +224,40 @@ function registerIpcHandlers(): void {
   })
 
   ipcMain.handle("models:list", () => {
-    try {
-      const config = getConfig()
-      const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
-      if (config.httpProxy) {
-        env.HTTP_PROXY = config.httpProxy
-        env.http_proxy = config.httpProxy
-      }
-      if (config.httpsProxy) {
-        env.HTTPS_PROXY = config.httpsProxy
-        env.https_proxy = config.httpsProxy
-        env.ALL_PROXY = config.httpsProxy
-        env.all_proxy = config.httpsProxy
-      }
-      if (config.noProxy) {
-        env.NO_PROXY = config.noProxy
-        env.no_proxy = config.noProxy
-      }
-      const out = execSync("agent --list-models", {
-        encoding: "utf-8",
-        timeout: 30000,
-        env,
-        shell: true,
-        windowsHide: true,
-      })
-      const models: { id: string; label: string; current: boolean }[] = []
-      for (const line of out.split("\n")) {
-        const trimmed = line.trim()
-        if (!trimmed || trimmed.startsWith("Available")) continue
-        const match = trimmed.match(/^(\S+)\s+[–—-]\s+(.+?)(\s+\((?:default|current)\))?$/)
-        if (match) {
-          models.push({ id: match[1], label: match[2].trim(), current: !!match[3] })
-        }
-      }
-      return { ok: true, models }
-    } catch (e: any) {
-      return { ok: false, models: [], error: e?.message ?? String(e) }
+    const config = getConfig()
+    const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
+    if (config.httpProxy) {
+      env.HTTP_PROXY = config.httpProxy
+      env.http_proxy = config.httpProxy
     }
+    if (config.httpsProxy) {
+      env.HTTPS_PROXY = config.httpsProxy
+      env.https_proxy = config.httpsProxy
+      env.ALL_PROXY = config.httpsProxy
+      env.all_proxy = config.httpsProxy
+    }
+    if (config.noProxy) {
+      env.NO_PROXY = config.noProxy
+      env.no_proxy = config.noProxy
+    }
+    const run = execAgentSync(["--list-models"], env, 30_000)
+    if (!run.ok) {
+      return { ok: false, models: [], error: run.error || run.stderr.trim() || "获取模型列表失败" }
+    }
+    const out = run.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
+    const models: { id: string; label: string; current: boolean }[] = []
+    for (const line of out.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed || /^available models/i.test(trimmed)) continue
+      let match = trimmed.match(/^(\S+)\s+[–—-]\s+(.+?)(\s+\((?:default|current)\))?\s*$/)
+      if (!match) {
+        match = trimmed.match(/^(\S+)\s+-\s+(.+?)(\s+\((?:default|current)\))?\s*$/)
+      }
+      if (match) {
+        models.push({ id: match[1], label: match[2].trim(), current: !!match[3] })
+      }
+    }
+    return { ok: true, models }
   })
 }
 

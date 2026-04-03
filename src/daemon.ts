@@ -4,6 +4,11 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { createRequire } from "node:module";
+import {
+  startDaemonScheduledTasks,
+  stopDaemonScheduledTasks,
+  setDaemonSchedulerLogger,
+} from "./daemon-scheduled-tasks.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -43,7 +48,11 @@ function localTimestamp(): string {
   const d = new Date();
   const pad2 = (n: number) => String(n).padStart(2, "0");
   const pad3 = (n: number) => String(n).padStart(3, "0");
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.${pad3(d.getMilliseconds())}`;
+}
+
+function escapeLogContentSingleLine(s: string): string {
+  return s.replace(/\r?\n/g, "\\n");
 }
 
 function ensureLogDir(): void {
@@ -65,8 +74,8 @@ function rotateLogIfNeeded(): void {
 function log(level: string, ...args: unknown[]): void {
   const ts = localTimestamp();
   const msg = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
-  const line = `[${ts}][${level}] ${msg}\n`;
-  process.stderr.write(`[LarkDaemon]${line}`);
+  const line = `${ts},LarkDaemon,${level},${escapeCsvLogField(msg)}\n`;
+  process.stderr.write(line);
   try {
     ensureLogDir();
     rotateLogIfNeeded();
@@ -390,7 +399,7 @@ function pushMessage(content: string, messageId?: string): void {
   }
   const written = pushToFileQueue(content, messageId);
   if (written) {
-    log("INFO", `消息已写入共享队列: "${content.slice(0, 60)}" (id=${messageId ?? "none"})`);
+    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"})`);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -418,7 +427,7 @@ function startLarkConnection(): void {
         let text = rawContent;
         try { text = JSON.parse(rawContent)?.text ?? rawContent; } catch { /* use raw */ }
 
-        log("INFO", `收到[${messageType}]: "${text?.slice(0, 80)}" (id=${messageId})`);
+        log("INFO", `收到[${messageType}]: ${JSON.stringify(text ?? "")} (id=${messageId})`);
 
         const senderOpenId = sender?.sender_id?.open_id;
         if (senderOpenId && !resolvedTarget) {
@@ -571,7 +580,7 @@ function cleanCommandMessagesFromQueue(): void {
         const parsed = JSON.parse(raw);
         if (typeof parsed.text === "string" && isCommand(parsed.text)) {
           fs.unlinkSync(path.join(fileQueueDir, f));
-          log("INFO", `从消息队列中清除指令消息: "${parsed.text.slice(0, 30)}"`);
+          log("INFO", `从消息队列中清除指令消息: ${JSON.stringify(parsed.text)}`);
         }
       } catch { /* ignore */ }
     }
@@ -648,7 +657,11 @@ function startHttpServer(): Promise<number> {
         if (method === "POST" && pathname === "/shutdown") {
           log("INFO", ">>> 收到 shutdown 请求，准备退出");
           json(res, { ok: true });
-          setTimeout(() => { removeLockFile(); process.exit(0); }, 200);
+          setTimeout(() => {
+            stopDaemonScheduledTasks();
+            removeLockFile();
+            process.exit(0);
+          }, 200);
           return;
         }
 
@@ -698,6 +711,17 @@ function startHttpServer(): Promise<number> {
         if (method === "GET" && pathname === "/dequeue") {
           const msg = claimNextMessage();
           json(res, { message: msg, queueLength: getFileQueueLength() });
+          return;
+        }
+
+        // ── 一次出队全部消息（供 Electron 合并后交给 Agent）
+        if (method === "POST" && pathname === "/dequeue-all") {
+          const messages: string[] = [];
+          let m: string | null;
+          while ((m = claimNextMessage()) !== null) {
+            messages.push(m);
+          }
+          json(res, { ok: true, messages, queueLength: getFileQueueLength() });
           return;
         }
 
@@ -806,7 +830,11 @@ export async function daemonMain(): Promise<void> {
   log("INFO", `日志文件: ${LOG_FILE_PATH}`);
   log("INFO", "════════════════════════════════════════════════");
 
-  const cleanup = () => { removeLockFile(); process.exit(0); };
+  const cleanup = () => {
+    stopDaemonScheduledTasks();
+    removeLockFile();
+    process.exit(0);
+  };
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
   process.on("exit", removeLockFile);
@@ -817,6 +845,9 @@ export async function daemonMain(): Promise<void> {
 
   daemonPort = await startHttpServer();
   writeLockFile(daemonPort);
+
+  setDaemonSchedulerLogger((msg) => { log("INFO", msg); });
+  startDaemonScheduledTasks((content) => { pushMessage(content); });
 
   log("INFO", `守护进程就绪 ✓ port=${daemonPort}`);
 }

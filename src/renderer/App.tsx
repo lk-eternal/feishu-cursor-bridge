@@ -2,6 +2,7 @@ import { useState, useEffect } from "react"
 import Setup from "./pages/Setup"
 import Dashboard from "./pages/Dashboard"
 import Settings from "./pages/Settings"
+import CloseWindowModal from "./components/CloseWindowModal"
 
 type Page = "setup" | "dashboard" | "settings"
 
@@ -9,6 +10,7 @@ export default function App() {
   const [page, setPage] = useState<Page>("setup")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
 
   useEffect(() => {
     if (!window.electronAPI) {
@@ -27,6 +29,15 @@ export default function App() {
         setLoading(false)
       })
   }, [])
+
+  useEffect(() => {
+    if (loading || error || !window.electronAPI) {
+      return
+    }
+    return window.electronAPI.onWindowCloseConfirm(() => {
+      setCloseConfirmOpen(true)
+    })
+  }, [loading, error])
 
   if (loading) {
     return (
@@ -48,7 +59,12 @@ export default function App() {
   }
 
   if (page === "setup") {
-    return <Setup onComplete={() => setPage("dashboard")} />
+    return (
+      <>
+        <Setup onComplete={() => setPage("dashboard")} />
+        <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
+      </>
+    )
   }
 
   return (
@@ -59,6 +75,7 @@ export default function App() {
       <div className={page === "settings" ? "" : "hidden"}>
         <Settings onBack={() => setPage("dashboard")} />
       </div>
+      <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
     </>
   )
 }

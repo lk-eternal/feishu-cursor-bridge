@@ -15,14 +15,10 @@ lite/dist/
 .env
 .env.*
 
-# Cursor runtime files
-.cursor/.lark-daemon.json
-.cursor/.lark-mcp.pid
-.cursor/lark-daemon.log
-.cursor/lark-daemon.log.old
-.cursor/agent-launch.log
-.cursor/memory.md
-.cursor/mcp.json
+# Runtime files
+.cursor
+.fastRequest
+.idea/*
 
 # Temporary
 tmp_exec/

@@ -11,9 +11,8 @@ import {
   Clock,
   Loader2,
   Activity,
-  Terminal,
   Download,
-  CheckCircle2,
+  LogIn,
   AlertTriangle,
 } from "lucide-react"
 
@@ -41,9 +40,12 @@ export default function Dashboard({ onSettings }: Props) {
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
       if (s.running && s.cliAvailable !== undefined) {
-        setCliStatus((prev) => prev === "checking" || prev === "missing"
-          ? (s.cliAvailable ? "installed" : "missing")
-          : prev)
+        setCliStatus((prev) => {
+          if (!s.cliAvailable && (prev === "installed" || prev === "need-login")) {
+            return "missing"
+          }
+          return prev
+        })
       }
       if (s.queueLength && s.queueLength > 0) {
         const msgs = await window.electronAPI.getQueueMessages()
@@ -55,7 +57,6 @@ export default function Dashboard({ onSettings }: Props) {
     refresh()
     const timer = setInterval(refresh, 5_000)
 
-    window.electronAPI.checkCli().then((ok) => setCliStatus(ok ? "installed" : "missing"))
     window.electronAPI.getLogBuffer().then((buf) => {
       if (buf.length > 0) setLogs(buf.join("\n"))
     })
@@ -63,9 +64,12 @@ export default function Dashboard({ onSettings }: Props) {
     const unsub = window.electronAPI.onDaemonStatus((s) => {
       setStatus(s)
       if (s.running && s.cliAvailable !== undefined) {
-        setCliStatus((prev) => prev === "checking" || prev === "missing"
-          ? (s.cliAvailable ? "installed" : "missing")
-          : prev)
+        setCliStatus((prev) => {
+          if (!s.cliAvailable && (prev === "installed" || prev === "need-login")) {
+            return "missing"
+          }
+          return prev
+        })
       }
     })
     const unsubLog = window.electronAPI.onDaemonLog((line) => {
@@ -75,8 +79,35 @@ export default function Dashboard({ onSettings }: Props) {
         return lines.length > 300 ? lines.slice(-300).join("\n") : next
       })
     })
+
+    const runCliChecks = () => {
+      void (async () => {
+        const installed = await window.electronAPI.checkCli()
+        if (!installed) {
+          setCliStatus("missing")
+          return
+        }
+        const st = await window.electronAPI.checkCliLogin()
+        if (st.loggedIn) {
+          setCliStatus("installed")
+        } else {
+          setCliStatus("need-login")
+        }
+      })()
+    }
+
+    let cancelCliSchedule: (() => void) | undefined
+    if (typeof requestIdleCallback === "function") {
+      const id = requestIdleCallback(runCliChecks, { timeout: 2500 })
+      cancelCliSchedule = () => cancelIdleCallback(id)
+    } else {
+      const cliTimer = window.setTimeout(runCliChecks, 0)
+      cancelCliSchedule = () => clearTimeout(cliTimer)
+    }
+
     return () => {
       clearInterval(timer)
+      cancelCliSchedule?.()
       unsub()
       unsubLog()
     }
@@ -134,8 +165,14 @@ export default function Dashboard({ onSettings }: Props) {
         try {
           const loginResult = await window.electronAPI.loginCli()
           if (loginResult.ok) {
-            setCliStatus("installed")
-            setCliMessage("")
+            const st = await window.electronAPI.checkCliLogin()
+            if (st.loggedIn) {
+              setCliStatus("installed")
+              setCliMessage("")
+            } else {
+              setCliStatus("need-login")
+              setCliMessage(st.error ?? loginResult.output ?? "请重试登录")
+            }
           } else {
             setCliMessage(loginResult.output)
           }
@@ -149,6 +186,29 @@ export default function Dashboard({ onSettings }: Props) {
       setCliMessage(e instanceof Error ? e.message : String(e))
     }
     setCliInstalling(false)
+  }
+
+  const handleLoginOnly = async () => {
+    setCliLoggingIn(true)
+    setCliMessage("")
+    try {
+      const loginResult = await window.electronAPI.loginCli()
+      if (!loginResult.ok) {
+        setCliMessage(loginResult.output)
+        setCliLoggingIn(false)
+        return
+      }
+      const st = await window.electronAPI.checkCliLogin()
+      if (st.loggedIn) {
+        setCliStatus("installed")
+        setCliMessage("")
+      } else {
+        setCliMessage(st.error ?? loginResult.output ?? "登录后仍未检测到账号，请重试")
+      }
+    } catch (e: unknown) {
+      setCliMessage(e instanceof Error ? e.message : String(e))
+    }
+    setCliLoggingIn(false)
   }
 
   const handleStopAgent = async () => {
@@ -215,7 +275,18 @@ export default function Dashboard({ onSettings }: Props) {
           label="Daemon"
           value={status.running ? "运行中" : "已停止"}
           color={status.running ? "green" : "red"}
-          sub={status.running ? `uptime ${formatUptime(status.uptime)}` : status.error}
+          sub={
+            status.running
+              ? [
+                  `uptime ${formatUptime(status.uptime)}`,
+                  status.workspaceMismatch
+                    ? (status.daemonWorkspaceDir
+                      ? `目录与设置不一致（Daemon: ${status.daemonWorkspaceDir}）`
+                      : "工作目录与设置不一致")
+                    : "",
+                ].filter(Boolean).join(" · ")
+              : status.error
+          }
           action={status.running ? (
             <button
               onClick={handleStop}
@@ -311,6 +382,28 @@ export default function Dashboard({ onSettings }: Props) {
               <Download size={12} />
             )}
             {cliInstalling ? "安装中..." : "一键安装"}
+          </button>
+        </div>
+      )}
+      {cliStatus === "need-login" && (
+        <div className="mx-6 flex items-center justify-between rounded-lg border border-yellow-800/50 bg-yellow-950/20 px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <AlertTriangle size={14} className="text-yellow-400" />
+            <span className="text-xs text-yellow-300">
+              Cursor CLI 未登录 — 请完成授权后再使用自动会话等功能
+            </span>
+          </div>
+          <button
+            onClick={handleLoginOnly}
+            disabled={cliLoggingIn}
+            className="flex items-center gap-1.5 rounded-md bg-blue-600/20 px-3 py-1 text-xs font-medium text-blue-400 transition hover:bg-blue-600/30 disabled:opacity-50"
+          >
+            {cliLoggingIn ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <LogIn size={12} />
+            )}
+            {cliLoggingIn ? "登录中..." : "登录 Cursor"}
           </button>
         </div>
       )}

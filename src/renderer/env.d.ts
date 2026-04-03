@@ -11,6 +11,7 @@ interface AppConfig {
   httpsProxy: string
   noProxy: string
   agentNewSession: boolean
+  closeWindowAction: "ask" | "minimize" | "quit"
 }
 
 interface ScheduledTask {
@@ -19,6 +20,13 @@ interface ScheduledTask {
   cron: string
   content: string
   enabled: boolean
+}
+
+interface CliLoginStatus {
+  cliFound: boolean
+  loggedIn: boolean
+  identityLine?: string
+  error?: string
 }
 
 interface McpServerEntry {
@@ -45,11 +53,25 @@ interface DaemonStatus {
   agentPid?: number | null
   cliAvailable?: boolean
   error?: string
+  workspaceMismatch?: boolean
+  daemonWorkspaceDir?: string
+}
+
+interface ConfigSaveResult {
+  ok: boolean
+  needWorkspaceDaemonChoice?: boolean
+  oldWorkspaceDir?: string
+  newWorkspaceDir?: string
+  deferredSetupComplete?: boolean
+  restartFailed?: string
+  workspaceDirChanged?: boolean
 }
 
 interface ElectronAPI {
   getConfig(): Promise<AppConfig>
-  saveConfig(config: Partial<AppConfig>): Promise<void>
+  saveConfig(config: Partial<AppConfig>): Promise<ConfigSaveResult>
+  applyWorkspaceDaemonRestart(workspaceDir: string): Promise<{ ok: boolean; error?: string }>
+  respondWindowClose(payload: { action: "minimize" | "quit" | "cancel"; remember: boolean }): Promise<void>
   selectDirectory(): Promise<string | null>
   injectWorkspace(): Promise<{ results: { file: string; action: string; message: string }[] }>
   startDaemon(): Promise<{ ok: boolean; error?: string }>
@@ -62,12 +84,14 @@ interface ElectronAPI {
   clearLogs(): Promise<void>
   getQueueMessages(): Promise<{ index: number; preview: string }[]>
   checkCli(): Promise<boolean>
+  checkCliLogin(): Promise<CliLoginStatus>
   installCli(): Promise<{ ok: boolean; output: string }>
   loginCli(): Promise<{ ok: boolean; output: string }>
   listModels(): Promise<{ ok: boolean; models: { id: string; label: string; current: boolean }[]; error?: string }>
   getScheduledTasks(): Promise<ScheduledTask[]>
   saveScheduledTasks(tasks: ScheduledTask[]): Promise<{ ok: boolean }>
   validateCron(expression: string): Promise<boolean>
+  previewCronNextRuns(expression: string): Promise<{ ok: true; runs: string[] } | { ok: false; error: string }>
   getOAuthMcps(): Promise<{ name: string; url: string; authenticated: boolean }[]>
   getMcpServers(): Promise<McpServerEntry[]>
   saveMcpServer(name: string, entry: Record<string, unknown>, source: "global" | "project"): Promise<{ ok: boolean }>
@@ -84,6 +108,7 @@ interface ElectronAPI {
   onMcpLoginComplete(cb: (data: { serverName: string; ok: boolean }) => void): () => void
   onDaemonStatus(cb: (status: DaemonStatus) => void): () => void
   onDaemonLog(cb: (line: string) => void): () => void
+  onWindowCloseConfirm(cb: () => void): () => void
 }
 
 declare global {

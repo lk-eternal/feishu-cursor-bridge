@@ -14,6 +14,7 @@ import {
   RefreshCw,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
+import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 
 interface Props {
   onComplete: () => void
@@ -50,6 +51,11 @@ export default function Setup({ onComplete }: Props) {
 
   const [steps, setSteps] = useState<StepStatus[]>([])
   const [launching, setLaunching] = useState(false)
+  const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{
+    old: string
+    new: string
+    deferred: boolean
+  } | null>(null)
 
   const canNext = (): boolean => {
     if (step === 0) return !!(appId.trim() && appSecret.trim())
@@ -73,12 +79,35 @@ export default function Setup({ onComplete }: Props) {
       noProxy: noProxy.trim(),
     })
     const result = await window.electronAPI.listModels()
-    if (result.ok) setModelOptions(result.models)
+    if (result.ok && result.models.length > 0) {
+      setModelOptions(result.models)
+    } else if (result.ok) {
+      alert("未解析到任何模型。请确认已登录 Cursor CLI，或在终端执行 agent --list-models 查看输出。")
+    } else {
+      alert(result.error || "获取模型列表失败")
+    }
     setLoadingModels(false)
   }
 
   const updateStep = (index: number, update: Partial<StepStatus>) => {
     setSteps((prev) => prev.map((s, i) => (i === index ? { ...s, ...update } : s)))
+  }
+
+  const runInjectAndDaemon = async () => {
+    updateStep(1, { status: "running" })
+    const wsResult = await window.electronAPI.injectWorkspace()
+    const summary = wsResult.results.map((r) => `${r.file}: ${r.action}`).join(", ")
+    updateStep(1, { status: "done", message: summary })
+
+    updateStep(2, { status: "running" })
+    const daemonResult = await window.electronAPI.startDaemon()
+    if (daemonResult.ok) {
+      updateStep(2, { status: "done", message: "Daemon 运行中" })
+    } else {
+      updateStep(2, { status: "error", message: daemonResult.error ?? "启动失败" })
+    }
+
+    setTimeout(onComplete, 1500)
   }
 
   const launch = async () => {
@@ -92,7 +121,7 @@ export default function Setup({ onComplete }: Props) {
 
     try {
       updateStep(0, { status: "running" })
-      await window.electronAPI.saveConfig({
+      const saveR = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(),
         larkAppSecret: appSecret.trim(),
         larkReceiveId: receiveId.trim(),
@@ -104,22 +133,25 @@ export default function Setup({ onComplete }: Props) {
         noProxy: noProxy.trim(),
         setupComplete: true,
       })
-      updateStep(0, { status: "done", message: "配置已加密保存" })
 
-      updateStep(1, { status: "running" })
-      const wsResult = await window.electronAPI.injectWorkspace()
-      const summary = wsResult.results.map((r) => `${r.file}: ${r.action}`).join(", ")
-      updateStep(1, { status: "done", message: summary })
-
-      updateStep(2, { status: "running" })
-      const daemonResult = await window.electronAPI.startDaemon()
-      if (daemonResult.ok) {
-        updateStep(2, { status: "done", message: "Daemon 运行中" })
-      } else {
-        updateStep(2, { status: "error", message: daemonResult.error ?? "启动失败" })
+      if (
+        saveR.needWorkspaceDaemonChoice
+        && saveR.oldWorkspaceDir !== undefined
+        && saveR.newWorkspaceDir !== undefined
+      ) {
+        updateStep(0, { status: "pending", message: "请确认是否在新目录下重启 Daemon" })
+        setWorkspaceDaemonChoice({
+          old: saveR.oldWorkspaceDir,
+          new: saveR.newWorkspaceDir,
+          deferred: !!saveR.deferredSetupComplete,
+        })
+        setWorkspaceDir(saveR.oldWorkspaceDir)
+        setLaunching(false)
+        return
       }
 
-      setTimeout(onComplete, 1500)
+      updateStep(0, { status: "done", message: "配置已加密保存" })
+      await runInjectAndDaemon()
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e)
       setSteps((prev) => {
@@ -438,6 +470,51 @@ export default function Setup({ onComplete }: Props) {
           </div>
         )}
       </div>
+
+      <WorkspaceDaemonModal
+        open={workspaceDaemonChoice !== null}
+        oldPath={workspaceDaemonChoice?.old ?? ""}
+        newPath={workspaceDaemonChoice?.new ?? ""}
+        onKeep={() => {
+          setWorkspaceDaemonChoice(null)
+        }}
+        onRestarted={(ok, err) => {
+          const ctx = workspaceDaemonChoice
+          setWorkspaceDaemonChoice(null)
+          if (!ok) {
+            if (err) {
+              alert(`重启 Daemon 失败：\n${err}`)
+            }
+            return
+          }
+          if (!ctx) {
+            return
+          }
+          void (async () => {
+            try {
+              if (ctx.deferred) {
+                await window.electronAPI.saveConfig({ setupComplete: true })
+              }
+              setWorkspaceDir(ctx.new)
+              updateStep(0, { status: "done", message: "配置已加密保存" })
+              setLaunching(true)
+              await runInjectAndDaemon()
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e)
+              setSteps((prev) => {
+                const running = prev.findIndex((s) => s.status === "running")
+                if (running >= 0) {
+                  return prev.map((s, i) =>
+                    i === running ? { ...s, status: "error" as const, message: msg } : s,
+                  )
+                }
+                return prev
+              })
+              setLaunching(false)
+            }
+          })()
+        }}
+      />
 
       {/* Navigation */}
       <div className="flex items-center justify-between border-t border-gray-800 px-8 py-4">

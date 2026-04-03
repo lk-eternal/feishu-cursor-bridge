@@ -21,6 +21,8 @@ export interface AppConfig {
   httpsProxy: string
   noProxy: string
   agentNewSession: boolean
+  /** 点关闭主窗口时：ask=弹窗选择；minimize=隐藏到托盘；quit=直接退出应用 */
+  closeWindowAction: "ask" | "minimize" | "quit"
   scheduledTasks: ScheduledTask[]
   verifiedMcpServers: string[]
 }
@@ -38,6 +40,7 @@ const defaults: AppConfig = {
   httpsProxy: "",
   noProxy: "localhost,127.0.0.1",
   agentNewSession: false,
+  closeWindowAction: "ask",
   scheduledTasks: [],
   verifiedMcpServers: [],
 }

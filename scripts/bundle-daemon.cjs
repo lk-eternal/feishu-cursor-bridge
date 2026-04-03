@@ -36,6 +36,7 @@ async function main() {
     ...common,
     entryPoints: [path.resolve(__dirname, "../dist/daemon-entry.js")],
     outfile: path.resolve(__dirname, "../dist-bundle/daemon-entry.mjs"),
+    external: ["node-cron"],
   });
 
   console.log("✓ daemon-entry.mjs bundled to dist-bundle/");

@@ -16,6 +16,8 @@ extraResources:
     filter:
       - "*.mjs"
       - "*.map"
+  - from: node_modules/node-cron
+    to: daemon/node_modules/node-cron
   - from: lite/dist/
     to: lite/dist/
     filter:

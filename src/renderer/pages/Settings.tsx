@@ -23,11 +23,13 @@ import {
   Sparkles,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
+import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 
 interface Props { onBack: () => void }
 
 type IdType = "open_id" | "user_id" | "chat_id"
 type Tab = "general" | "proxy" | "mcp" | "rules" | "tasks" | "skills"
+type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
   json: string; source: "global" | "project"; jsonError?: string
@@ -63,6 +65,8 @@ export default function Settings({ onBack }: Props) {
   const [proxy, setProxy] = useState("")
   const [noProxy, setNoProxy] = useState("localhost,127.0.0.1")
   const [agentNewSession, setAgentNewSession] = useState(false)
+  const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
+  const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
 
   const [saved, setSaved] = useState(false)
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
@@ -85,6 +89,10 @@ export default function Settings({ onBack }: Props) {
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [taskEditing, setTaskEditing] = useState<TaskItem | null>(null)
   const [taskCronValid, setTaskCronValid] = useState(true)
+  const [cronPreviewRuns, setCronPreviewRuns] = useState<string[] | null>(null)
+  const [cronPreviewErr, setCronPreviewErr] = useState<string | null>(null)
+  const [cronPreviewLoading, setCronPreviewLoading] = useState(false)
+  const cronPreviewReq = useRef(0)
 
   const loaded = useRef(false)
   const mcpLoaded = useRef(false)
@@ -112,6 +120,7 @@ export default function Settings({ onBack }: Props) {
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1")
       setAgentNewSession(config.agentNewSession ?? false)
+      setCloseWindowAction(config.closeWindowAction ?? "ask")
       loaded.current = true
     })
     refreshMcpServers(); refreshRules(); refreshSkills(); refreshTasks()
@@ -124,24 +133,79 @@ export default function Settings({ onBack }: Props) {
     if (!loaded.current) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(async () => {
-      await window.electronAPI.saveConfig({
+      const r = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
         larkReceiveId: receiveId.trim(), larkReceiveIdType: idType,
         workspaceDir: workspaceDir.trim(), model,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
+        closeWindowAction,
       })
+      if (r.needWorkspaceDaemonChoice && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
+        setWorkspaceDaemonChoice({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir })
+        setWorkspaceDir(r.oldWorkspaceDir)
+      }
+      if (r.workspaceDirChanged) {
+        void refreshMcpServers(true)
+      }
+      if (r.restartFailed) {
+        alert(`工作目录已保存，但 Daemon 未能自动启动：\n${r.restartFailed}`)
+      }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, idType, workspaceDir, model, proxy, noProxy, agentNewSession])
+  }, [appId, appSecret, receiveId, idType, workspaceDir, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
+  useEffect(() => {
+    if (!taskEditing) {
+      setCronPreviewRuns(null)
+      setCronPreviewErr(null)
+      setCronPreviewLoading(false)
+      return
+    }
+    const cron = taskEditing.cron.trim()
+    if (!cron) {
+      setCronPreviewRuns(null)
+      setCronPreviewErr(null)
+      setCronPreviewLoading(false)
+      return
+    }
+    const req = ++cronPreviewReq.current
+    const t = setTimeout(async () => {
+      if (req !== cronPreviewReq.current) return
+      setCronPreviewLoading(true)
+      setCronPreviewRuns(null)
+      setCronPreviewErr(null)
+      try {
+        const r = await window.electronAPI.previewCronNextRuns(cron)
+        if (req !== cronPreviewReq.current) return
+        if (r.ok) {
+          setCronPreviewRuns(r.runs)
+        } else {
+          setCronPreviewErr(r.error)
+        }
+      } finally {
+        if (req === cronPreviewReq.current) setCronPreviewLoading(false)
+      }
+    }, 320)
+    return () => clearTimeout(t)
+  }, [taskEditing])
+
   const fetchModels = async () => {
     setLoadingModels(true)
-    const r = await window.electronAPI.listModels()
-    if (r.ok) setModelOptions(r.models)
-    setLoadingModels(false)
+    try {
+      const r = await window.electronAPI.listModels()
+      if (r.ok && r.models.length > 0) {
+        setModelOptions(r.models)
+      } else if (r.ok) {
+        alert("未解析到任何模型。请确认已在设置中完成 Cursor CLI 登录，或在终端执行 agent --list-models 查看输出格式是否变化。")
+      } else {
+        alert(r.error || "获取模型列表失败")
+      }
+    } finally {
+      setLoadingModels(false)
+    }
   }
 
   const selectDir = async () => { const d = await window.electronAPI.selectDirectory(); if (d) setWorkspaceDir(d) }
@@ -352,7 +416,35 @@ export default function Settings({ onBack }: Props) {
                   </button>
                 </div>
               </section>
-              <p className="text-xs text-gray-500">设置修改后自动保存，下次重启 Daemon 后生效</p>
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">关闭主窗口</h3>
+                <p className="text-xs text-gray-600">点击窗口右上角关闭时的行为（可从系统托盘再次打开窗口）。</p>
+                <div className="space-y-2">
+                  {([
+                    { v: "ask" as const, t: "每次询问", d: "弹窗选择最小化到托盘或退出应用" },
+                    { v: "minimize" as const, t: "总是最小化到托盘", d: "直接隐藏窗口，不弹窗" },
+                    { v: "quit" as const, t: "总是退出应用", d: "关闭窗口并退出（含 Daemon、托盘）" },
+                  ]).map((opt) => (
+                    <label
+                      key={opt.v}
+                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 transition ${closeWindowAction === opt.v ? "border-blue-500 bg-blue-500/10" : "border-gray-700 hover:border-gray-600"}`}
+                    >
+                      <input
+                        type="radio"
+                        name="closeWindowAction"
+                        checked={closeWindowAction === opt.v}
+                        onChange={() => setCloseWindowAction(opt.v)}
+                        className="mt-1 rounded-full border-gray-600"
+                      />
+                      <div>
+                        <p className="text-sm font-medium">{opt.t}</p>
+                        <p className="text-xs text-gray-500">{opt.d}</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </section>
+              <p className="text-xs text-gray-500">关闭窗口相关选项保存后立即生效。其余设置自动保存，部分项需重启 Daemon 后生效。</p>
             </>)}
 
             {/* ═══ Proxy ═══ */}
@@ -448,7 +540,6 @@ export default function Settings({ onBack }: Props) {
                   <div className="flex-1" />
                   <button onClick={openTaskAdd} className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Plus size={12} />新增</button>
                 </div>
-                <p className="text-xs text-gray-600">Daemon 启动后按 cron 表达式自动触发，向飞书发送消息驱动 Agent</p>
                 <div className="space-y-2">
                   {tasks.map((t) => (
                     <div key={t.id} className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
@@ -592,7 +683,29 @@ export default function Settings({ onBack }: Props) {
                 <label className="mb-1 block text-xs text-gray-500">Cron 表达式</label>
                 <input type="text" value={taskEditing.cron} onChange={(e) => { setTaskEditing({ ...taskEditing, cron: e.target.value }); setTaskCronValid(true) }} className={inputCls + (!taskCronValid ? " border-red-500" : "")} placeholder="0 9 * * 1-5" />
                 {!taskCronValid && <p className="mt-1 text-xs text-red-400">Cron 表达式无效</p>}
-                <p className="mt-1 text-xs text-gray-600">格式: 分 时 日 月 周 （如 0 9 * * 1-5 = 工作日 9:00）</p>
+                <p className="mt-1 text-xs text-gray-600">
+                  五段：分 时 日 月 周（如 0 9 * * 1-5 = 工作日 9:00）。六段时在前面加「秒」：秒 分 时 日 月 周。
+                  每 5 秒请用 <code className="rounded bg-gray-800 px-1">*/5 * * * * *</code>，勿用 <code className="rounded bg-gray-800 px-1">0/5</code>（在 node-cron 里会变成每分钟一次）。
+                </p>
+                <div className="mt-2 rounded-lg border border-gray-800 bg-gray-900/80 px-3 py-2">
+                  <p className="text-xs font-medium text-gray-500">最近 5 次触发（本地时间）</p>
+                  {cronPreviewLoading && (
+                    <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-500">
+                      <Loader2 size={12} className="animate-spin" />计算中…
+                    </p>
+                  )}
+                  {!cronPreviewLoading && cronPreviewErr && (
+                    <p className="mt-1 text-xs text-amber-400/90">{cronPreviewErr}</p>
+                  )}
+                  {!cronPreviewLoading && !cronPreviewErr && cronPreviewRuns && cronPreviewRuns.length > 0 && (
+                    <ol className="mt-1.5 list-decimal space-y-0.5 pl-4 font-mono text-[11px] leading-relaxed text-gray-400">
+                      {cronPreviewRuns.map((line, i) => (
+                        <li key={`${line}-${i}`}>{line}</li>
+                      ))}
+                    </ol>
+                  )}
+                  <p className="mt-1.5 text-[10px] text-gray-600">由解析库推算，与 node-cron 在少数写法上可能略有差异，以实际日志为准。</p>
+                </div>
               </div>
               <div><label className="mb-1 block text-xs text-gray-500">消息内容</label><textarea value={taskEditing.content} onChange={(e) => setTaskEditing({ ...taskEditing, content: e.target.value })} rows={6} className={inputCls + " font-mono text-xs leading-relaxed"} placeholder="要发送给 Agent 的消息..." /></div>
               <div className="flex items-center gap-2">
@@ -607,6 +720,23 @@ export default function Settings({ onBack }: Props) {
           </div>
         </div>
       )}
+
+      <WorkspaceDaemonModal
+        open={workspaceDaemonChoice !== null}
+        oldPath={workspaceDaemonChoice?.old ?? ""}
+        newPath={workspaceDaemonChoice?.new ?? ""}
+        onKeep={() => setWorkspaceDaemonChoice(null)}
+        onRestarted={(ok, err) => {
+          const chosenNew = workspaceDaemonChoice?.new ?? ""
+          setWorkspaceDaemonChoice(null)
+          if (!ok) {
+            alert(err ? `重启 Daemon 失败：\n${err}` : "重启 Daemon 失败")
+            return
+          }
+          setWorkspaceDir(chosenNew)
+          void refreshMcpServers(true)
+        }}
+      />
     </div>
   )
 }
