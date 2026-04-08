@@ -1,12 +1,13 @@
 import { spawn, spawnSync, execSync, exec, type ChildProcess } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import * as http from "node:http"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import { promisify } from "node:util"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
-import { getConfig, saveConfig, type AppConfig } from "./config-store"
-import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns } from "./cron-scheduler"
+import { getConfig, saveConfig, type AppConfig, type ScheduledTask } from "./config-store"
+import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
 
 const execAsync = promisify(exec)
 
@@ -647,6 +648,7 @@ export async function checkCliInstalled(): Promise<boolean> {
   if (resolveAgentBinary()) return true
   return new Promise((resolve) => {
     let settled = false
+    pushUiLog("Agent", "INFO", `[CLI check-installed] agent ${JSON.stringify(["--version"])}`)
     const child = spawn("agent", ["--version"], {
       stdio: "ignore",
       shell: process.platform === "win32",
@@ -736,6 +738,7 @@ export async function loginCli(): Promise<{ ok: boolean; output: string }> {
     let settled = false
 
     broadcastLog("[CLI Login] 正在打开浏览器进行 Cursor 账号授权...")
+    logCursorAgentInvocation("cli-login", args, undefined)
 
     try {
       if (agentNodePath && agentIndexPath) {
@@ -924,6 +927,23 @@ let agentIndexPath = ""
 let lastAgentLaunchTime = 0
 const AGENT_COOLDOWN_MS = 15_000
 
+/**
+ * 将 Cursor CLI（agent）一次调用的可执行文件、完整参数数组与工作目录写入 UI 日志。
+ *
+ * @param logLabel 调用场景标识
+ * @param agentArgs 传给 agent 的参数（不含 Windows 下的 index.js）
+ * @param cwd 子进程工作目录（若有）
+ */
+function logCursorAgentInvocation(logLabel: string, agentArgs: string[], cwd?: string): void {
+  const cwdSuffix = cwd != null && cwd !== "" ? ` cwd=${cwd}` : ""
+  if (agentNodePath && agentIndexPath) {
+    const argv = [agentIndexPath, ...agentArgs]
+    pushUiLog("Agent", "INFO", `[CLI ${logLabel}] ${agentNodePath} ${JSON.stringify(argv)}${cwdSuffix}`)
+  } else {
+    pushUiLog("Agent", "INFO", `[CLI ${logLabel}] agent ${JSON.stringify(agentArgs)}${cwdSuffix}`)
+  }
+}
+
 /** 工作区从未对话过时，`agent --continue` 会输出并退出 */
 const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
@@ -948,7 +968,7 @@ function resolveAgentBinary(): boolean {
   } catch { return false }
 }
 
-export type ExecAgentSyncOptions = { timeoutMs?: number; cwd?: string }
+export type ExecAgentSyncOptions = { timeoutMs?: number; cwd?: string; logLabel?: string }
 
 /**
  * 与 launchAgent 相同方式解析 Cursor CLI；主进程环境常无 agent 在 PATH（尤其 Windows），需走 node.exe + index.js。
@@ -968,6 +988,7 @@ export function execAgentSync(
       return { ok: false, stdout: "", stderr: "", error: "未找到 Cursor CLI（agent），请先安装并完成登录" }
     }
   }
+  logCursorAgentInvocation(opts.logLabel ?? "invoke-sync", agentArgs, cwd)
   const mergedEnv = { ...process.env as Record<string, string>, ...env }
   if (agentNodePath && agentIndexPath) {
     const r = spawnSync(agentNodePath, [agentIndexPath, ...agentArgs], {
@@ -1028,6 +1049,7 @@ export async function execAgentAsync(
     }
   }
 
+  logCursorAgentInvocation(opts.logLabel ?? "invoke-async", agentArgs, cwd)
   const mergedEnv = { ...process.env as Record<string, string>, ...env }
 
   return new Promise((resolve) => {
@@ -1094,8 +1116,16 @@ export type AgentLoginStatus = {
 
 /**
  * 通过 `agent whoami` 判断是否已登录（成功时 stdout 通常含 Logged in as ...）。
+ * 若本应用已拉起 Agent 子进程，则不再 spawn whoami，避免与 Dashboard 的 requestIdleCallback 检测叠在启动后、造成「Agent 已跑仍打 whoami」的错觉与多余进程。
  */
 export async function checkAgentLoggedIn(): Promise<AgentLoginStatus> {
+  if (isAgentRunning()) {
+    return {
+      cliFound: true,
+      loggedIn: true,
+      identityLine: "Agent 运行中（已跳过 whoami）",
+    }
+  }
   if (!resolveAgentBinary()) {
     await refreshPathAsync()
     if (!resolveAgentBinary()) {
@@ -1106,7 +1136,7 @@ export async function checkAgentLoggedIn(): Promise<AgentLoginStatus> {
   const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
   applyProxyEnv(env, config)
   const workspaceCwd = config.workspaceDir?.trim() || undefined
-  const r = await execAgentAsync(["whoami"], env, { timeoutMs: 15_000, cwd: workspaceCwd })
+  const r = await execAgentAsync(["whoami"], env, { timeoutMs: 15_000, cwd: workspaceCwd, logLabel: "whoami" })
   const out = r.stdout.trim()
   const err = r.stderr.trim()
   if (r.ok) {
@@ -1162,15 +1192,15 @@ function startAgentChildProcess(
 
   try {
     let child: ChildProcess
+    const ws = getConfig().workspaceDir?.trim() || undefined
+    logCursorAgentInvocation("launch", args, ws)
     if (agentNodePath && agentIndexPath) {
-      broadcastLog(`Agent 启动: ${agentNodePath} ${path.basename(agentIndexPath)}`)
       child = spawn(agentNodePath, [agentIndexPath, ...args], {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: spawnEnv,
       })
     } else {
-      broadcastLog("Agent 启动: agent command")
       child = spawn("agent", args, {
         shell: process.platform === "win32",
         windowsHide: true,
@@ -1242,14 +1272,20 @@ export function launchAgent(initialMessage?: string): { ok: boolean; error?: str
   const prompt = initialMessage
     ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是用户通过飞书发来的消息，请直接处理，不要发送问候语：\n\n${initialMessage}`
     : "请遵守飞书工作流规则feishu-cursor-bridge开始工作,先获取待处理的飞书消息，然后根据消息内容开始工作。不要发送问候消息。"
-  const includeContinue = !config.agentNewSession
+  const skipContinueOnce = config.agentSkipContinueNextLaunch === true
+  const includeContinue = !config.agentNewSession && !skipContinueOnce
   const args = buildAgentLaunchArgs(config, prompt, includeContinue)
 
   const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent" }
   delete spawnEnv.NODE_USE_ENV_PROXY
   applyProxyEnv(spawnEnv, config)
 
-  return startAgentChildProcess(args, spawnEnv, includeContinue)
+  const started = startAgentChildProcess(args, spawnEnv, includeContinue)
+  if (started.ok && skipContinueOnce) {
+    saveConfig({ agentSkipContinueNextLaunch: false })
+    broadcastLog("[Agent] 已消费 /reset 标记：本次未使用 --continue，后续恢复设置中的「新会话」偏好", "INFO")
+  }
+  return started
 }
 
 export function stopAgent(): void {
@@ -1269,6 +1305,330 @@ async function reportCommandResult(port: number, messageId: string, ok: boolean,
   } catch (e: unknown) {
     broadcastLog(`指令结果回报失败: ${e instanceof Error ? e.message : e}`, "WARN")
   }
+}
+
+const TASK_SUBCMD_HELP =
+  "💡 可用指令\n" +
+  "🔹 /task 显示本说明\n" +
+  "🔹 /task ls 列出所有任务\n" +
+  "🔹 /task info <序号> 查看详情\n" +
+  "🔹 /task stop <序号> 停止任务\n" +
+  "🔹 /task start <序号> 启动任务\n" +
+  "🔹 /task delete <序号> 删除任务\n" +
+  "🔹 /task create <名称> <cron> <内容> 创建任务\n" +
+  "🔹 /task update <序号> [-name 值] [-cron 值] [-content 值] 更新任务"
+
+function parseTaskOneBasedIndex(s: string | undefined): number | null {
+  if (s === undefined || s === "") {
+    return null
+  }
+  const n = parseInt(s, 10)
+  if (!Number.isInteger(n) || n < 1) {
+    return null
+  }
+  return n
+}
+
+function parseTaskCreateArgs(parts: string[]):
+  | { ok: true; name: string; cron: string; content: string }
+  | { ok: false; error: string } {
+  const afterCreate = parts.slice(2)
+  if (afterCreate.length < 1 + 5 + 1) {
+    return { ok: false, error: "❌ 参数不足：/task create <名称> <cron五或六段> <内容>" }
+  }
+  for (const cronLen of [6, 5] as const) {
+    if (afterCreate.length < cronLen + 2) {
+      continue
+    }
+    for (let nameLen = 1; nameLen <= afterCreate.length - cronLen - 1; nameLen++) {
+      const name = afterCreate.slice(0, nameLen).join(" ").trim()
+      if (!name) {
+        continue
+      }
+      const cronToks = afterCreate.slice(nameLen, nameLen + cronLen)
+      const cronExpr = cronToks.join(" ").trim()
+      if (!validateCron(cronExpr)) {
+        continue
+      }
+      const content = afterCreate.slice(nameLen + cronLen).join(" ").trim()
+      if (!content) {
+        return { ok: false, error: "任务内容不能为空" }
+      }
+      return { ok: true, name, cron: cronExpr, content }
+    }
+  }
+  return { ok: false, error: "无法解析：请保证「名称」「cron（连续 5 或 6 段）」「内容」三部分，且 cron 能通过校验" }
+}
+
+function parseTaskUpdateArgs(parts: string[]):
+  | { ok: true; oneBasedIndex: number; updates: { name?: string; cron?: string; content?: string } }
+  | { ok: false; error: string } {
+  if (parts.length < 4) {
+    return { ok: false, error: "💡 用法：/task update <序号> [-name 值] [-cron 值] [-content 值]" }
+  }
+  const idx = parseTaskOneBasedIndex(parts[2])
+  if (idx === null) {
+    return { ok: false, error: "❌ 序号须为正整数" }
+  }
+  const known = new Set(["-name", "-cron", "-content"])
+  let i = 3
+  const updates: { name?: string; cron?: string; content?: string } = {}
+  while (i < parts.length) {
+    const flag = parts[i].toLowerCase()
+    if (!known.has(flag)) {
+      return { ok: false, error: `❌ 未知选项: ${parts[i]}（仅支持 -name -cron -content）` }
+    }
+    i++
+    const valBuf: string[] = []
+    while (i < parts.length) {
+      const t = parts[i]
+      if (t.startsWith("-") && known.has(t.toLowerCase())) {
+        break
+      }
+      valBuf.push(t)
+      i++
+    }
+    if (valBuf.length === 0) {
+      return { ok: false, error: `❌ ${flag} 缺少取值` }
+    }
+    const val = valBuf.join(" ").trim()
+    if (flag === "-name") {
+      updates.name = val
+    } else if (flag === "-cron") {
+      updates.cron = val
+    } else {
+      updates.content = val
+    }
+  }
+  if (Object.keys(updates).length === 0) {
+    return { ok: false, error: "❌ 至少指定一项：-name / -cron / -content" }
+  }
+  return { ok: true, oneBasedIndex: idx, updates }
+}
+
+const TASK_PREVIEW_BULLETS = ["①", "②", "③", "④", "⑤"] as const
+
+function taskPreviewBullet(i: number): string {
+  return TASK_PREVIEW_BULLETS[i] ?? `${i + 1}.`
+}
+
+function formatTaskStatusLine(enabled: boolean): string {
+  return enabled ? "✅ 运行中" : "⏸️ 已停止"
+}
+
+async function handleFeishuTaskCommand(port: number, messageId: string, raw: string): Promise<void> {
+  const parts = raw.trim().split(/\s+/).filter((p) => p.length > 0)
+  const low = (s: string) => s.toLowerCase()
+
+  if (parts.length <= 1) {
+    await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP)
+    return
+  }
+
+  const sub = low(parts[1])
+  if (sub === "help" || sub === "-h" || sub === "--help") {
+    await reportCommandResult(port, messageId, true, TASK_SUBCMD_HELP)
+    return
+  }
+
+  let tasks = readTasksFromFile()
+
+  if (sub === "ls") {
+    if (tasks.length === 0) {
+      await reportCommandResult(
+        port,
+        messageId,
+        true,
+        "📭 当前还没有定时任务～\n\n💡 需要的话可以用：\n   /task create <名称> <cron> <内容>",
+      )
+      return
+    }
+    const blocks = tasks.map((t, i) => {
+      const n = i + 1
+      return [
+        "┈┈┈┈┈┈┈┈┈┈",
+        `#${n}\t📋 名称 · ${t.name}`,
+        `\t💠 状态 · ${formatTaskStatusLine(t.enabled)}`,
+        `\t🔄 Cron · ${t.cron}`,
+        `\t⏱️ 下次 · ${t.enabled ? getNextCronFireLabel(t.cron) : "-"}`
+      ].join("\n")
+    })
+    const header = `⏰ 定时任务一览（共 ${tasks.length} 条）`
+    await reportCommandResult(port, messageId, true, `${header}\n\n${blocks.join("\n\n")}\n\n✨ 看某条详情：/task info <序号>`)
+    return
+  }
+
+  if (sub === "info") {
+    const idx = parseTaskOneBasedIndex(parts[2])
+    if (idx === null) {
+      await reportCommandResult(port, messageId, false, "💡 用法：/task info <序号>（数字见 /task ls 的 #）")
+      return
+    }
+    if (tasks.length === 0) {
+      await reportCommandResult(port, messageId, false, "📭 还没有任何任务，先用 /task ls 确认一下吧～")
+      return
+    }
+    if (idx > tasks.length) {
+      await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（当前共 ${tasks.length} 条）`)
+      return
+    }
+    const t = tasks[idx - 1]
+    const statusLine = formatTaskStatusLine(t.enabled)
+    let scheduleSection: string
+    const prev = previewCronNextRuns(t.cron)
+    if (prev.ok) {
+      const lines = prev.runs.map((r, i) => `   ${taskPreviewBullet(i)} ${r}`)
+      scheduleSection = `⏱️ 最近计划触发（${prev.runs.length} 次预览）\n${lines.join("\n")}`
+    } else {
+      scheduleSection = ``
+    }
+    const body = [
+      `📋 任务详情  #${idx}`,
+      "",
+      `📝 名称 · ${t.name}`,
+      `💠 状态 · ${statusLine}`,
+      `🔄 Cron · ${t.cron}`,
+      scheduleSection,
+      "",
+      "✉️ 任务内容",
+      "────────────",
+      t.content,
+    ].join("\n")
+    await reportCommandResult(port, messageId, true, body)
+    return
+  }
+
+  if (sub === "stop") {
+    const idx = parseTaskOneBasedIndex(parts[2])
+    if (idx === null) {
+      await reportCommandResult(port, messageId, false, "💡 用法：/task stop <序号>（数字见 /task ls 的 #）")
+      return
+    }
+    if (idx > tasks.length) {
+      await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`)
+      return
+    }
+    const name = tasks[idx - 1].name
+    tasks = tasks.map((t, j) => (j === idx - 1 ? { ...t, enabled: false } : t))
+    writeTasksToFile(tasks)
+    await reportCommandResult(port, messageId, true, `⏸️ 已停止任务 #${idx} ${name}`)
+    return
+  }
+
+  if (sub === "start") {
+    const idx = parseTaskOneBasedIndex(parts[2])
+    if (idx === null) {
+      await reportCommandResult(port, messageId, false, "💡 用法：/task start <序号>（数字见 /task ls 的 #）")
+      return
+    }
+    if (idx > tasks.length) {
+      await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`)
+      return
+    }
+    const name = tasks[idx - 1].name
+    const cron = tasks[idx - 1].cron
+    tasks = tasks.map((t, j) => (j === idx - 1 ? { ...t, enabled: true } : t))
+    writeTasksToFile(tasks)
+    const next = getNextCronFireLabel(cron)
+    await reportCommandResult(port, messageId, true, `✅ 已启动任务 #${idx} ${name}\n下次执行: ${next}`)
+    return
+  }
+
+  if (sub === "delete") {
+    const idx = parseTaskOneBasedIndex(parts[2])
+    if (idx === null) {
+      await reportCommandResult(port, messageId, false, "💡 用法：/task delete <序号>（数字见 /task ls 的 #）")
+      return
+    }
+    if (idx > tasks.length) {
+      await reportCommandResult(port, messageId, false, `😅 序号 ${idx} 对应的任务不存在哦（共 ${tasks.length} 条）`)
+      return
+    }
+    const name = tasks[idx - 1].name
+    tasks = tasks.filter((_, j) => j !== idx - 1)
+    writeTasksToFile(tasks)
+    await reportCommandResult(port, messageId, true, `🗑️ 已删除任务 #${idx} ${name}`)
+    return
+  }
+
+  if (sub === "create") {
+    const parsed = parseTaskCreateArgs(parts)
+    if (!parsed.ok) {
+      await reportCommandResult(port, messageId, false, parsed.error)
+      return
+    }
+    const newTask: ScheduledTask = {
+      id: randomUUID(),
+      name: parsed.name,
+      cron: parsed.cron,
+      content: parsed.content,
+      enabled: true,
+    }
+    tasks = [...tasks, newTask]
+    writeTasksToFile(tasks)
+    const next = getNextCronFireLabel(parsed.cron)
+    await reportCommandResult(port, messageId, true, `✅ 已创建并启动：${parsed.name}\n下次执行: ${next}`)
+    return
+  }
+
+  if (sub === "update") {
+    const pu = parseTaskUpdateArgs(parts)
+    if (!pu.ok) {
+      await reportCommandResult(port, messageId, false, pu.error)
+      return
+    }
+    if (pu.oneBasedIndex > tasks.length) {
+      await reportCommandResult(port, messageId, false, `😅 序号 ${pu.oneBasedIndex} 对应的任务不存在哦（共 ${tasks.length} 条）`)
+      return
+    }
+    const t = tasks[pu.oneBasedIndex - 1]
+    let nextName = t.name
+    let nextCron = t.cron
+    let nextContent = t.content
+    if (pu.updates.name !== undefined) {
+      nextName = pu.updates.name
+    }
+    if (pu.updates.cron !== undefined) {
+      nextCron = pu.updates.cron
+    }
+    if (pu.updates.content !== undefined) {
+      nextContent = pu.updates.content
+    }
+    if (pu.updates.cron !== undefined && !validateCron(nextCron)) {
+      await reportCommandResult(port, messageId, false, "😅 新 Cron 表达式无效")
+      return
+    }
+    const updated: ScheduledTask = { ...t, name: nextName, cron: nextCron, content: nextContent }
+    tasks = tasks.map((x, j) => (j === pu.oneBasedIndex - 1 ? updated : x))
+    writeTasksToFile(tasks)
+
+    const statusLine = formatTaskStatusLine(t.enabled)
+    let scheduleSection: string
+    const prev = previewCronNextRuns(t.cron)
+    if (prev.ok) {
+      const lines = prev.runs.map((r, i) => `   ${taskPreviewBullet(i)} ${r}`)
+      scheduleSection = `⏱️ 最近计划触发（${prev.runs.length} 次预览）\n${lines.join("\n")}`
+    } else {
+      scheduleSection = ``
+    }
+    const body = [
+      `✅ 已更新任务`,
+      `📋 任务详情  #${pu.oneBasedIndex}`,
+      "",
+      `📝 名称 · ${t.name}`,
+      `💠 状态 · ${statusLine}`,
+      `🔄 Cron · ${t.cron}`,
+      scheduleSection,
+      "",
+      "✉️ 任务内容",
+      "────────────",
+      t.content,
+    ].join("\n")
+    await reportCommandResult(port, messageId, true, body)
+    return
+  }
+
+  await reportCommandResult(port, messageId, false, `😅 未知子命令: ${parts[1]}\n\n${TASK_SUBCMD_HELP}`)
 }
 
 async function checkAndExecutePendingCommands(): Promise<void> {
@@ -1291,25 +1651,33 @@ async function checkAndExecutePendingCommands(): Promise<void> {
       claimed = { command: claimRes.command!, messageId: claimRes.messageId! }
     } catch { continue }
 
-    broadcastLog(`[指令] 执行 ${claimed.command} (msgId=${claimed.messageId})`)
+    const rawCmd = claimed.command.trim()
+    const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
+    const head = (cmdTokens[0] ?? "").toLowerCase()
+
+    broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId})`)
     try {
-      switch (claimed.command) {
+      switch (head) {
         case "/stop": {
           const wasRunning = isAgentRunning()
           stopAgent()
           await reportCommandResult(lock.port, claimed.messageId, true,
-            wasRunning ? "Agent 已停止" : "Agent 当前未运行")
+            wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
           break
         }
 
         case "/status": {
           const status = await getDaemonStatus()
+          const schedTasks = readTasksFromFile()
+          const schedTotal = schedTasks.length
+          const schedEnabled = schedTasks.filter((t) => t.enabled).length
           const lines = [
-            `Daemon: ${status.running ? "运行中" : "未运行"}`,
-            status.version ? `版本: ${status.version}` : "",
-            status.uptime !== undefined ? `运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
-            `Agent: ${isAgentRunning() ? `运行中 (PID: ${agentChild?.pid})` : "未运行"}`,
-            `队列消息: ${status.queueLength ?? 0} 条`,
+            `🛡️ Daemon: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
+            status.version ? `🔄 版本: ${status.version}` : "",
+            status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
+            `🤖 Agent: ${isAgentRunning() ? `✅ 运行中 (PID: ${agentChild?.pid})` : "❌ 未运行"}`,
+            `📭 队列消息: ${status.queueLength ?? 0} 条`,
+            `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean)
           await reportCommandResult(lock.port, claimed.messageId, true, lines.join("\n"))
           break
@@ -1318,26 +1686,17 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         case "/list": {
           const msgs = await getQueueMessages()
           if (msgs.length === 0) {
-            await reportCommandResult(lock.port, claimed.messageId, true, "消息队列为空")
+            await reportCommandResult(lock.port, claimed.messageId, true, "📭 消息队列为空")
           } else {
             const lines = msgs.map((m) => `  [${m.index}] ${m.preview}`)
             await reportCommandResult(lock.port, claimed.messageId, true,
-              `队列中有 ${msgs.length} 条消息：\n${lines.join("\n")}`)
+              `📬 队列中有 ${msgs.length} 条消息：\n${lines.join("\n")}`)
           }
           break
         }
 
         case "/task": {
-          const tasks = readTasksFromFile()
-          if (tasks.length === 0) {
-            await reportCommandResult(lock.port, claimed.messageId, true, "暂无定时任务")
-          } else {
-            const lines = tasks.map((t, i) =>
-              `${i + 1}. ${t.enabled ? "✅" : "⏸️"} ${t.name}\n   Cron: ${t.cron}\n   内容: ${t.content}`,
-            )
-            await reportCommandResult(lock.port, claimed.messageId, true,
-              `定时任务 (${tasks.length})：\n\n${lines.join("\n\n")}`)
-          }
+          await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd)
           break
         }
 
@@ -1345,7 +1704,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           stopAgent()
           const cleared = await clearMessageQueue()
           await reportCommandResult(lock.port, claimed.messageId, true,
-            `Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
+            `✅ Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
           await stopDaemon()
           await new Promise((r) => setTimeout(r, 1500))
           const result = await startDaemon()
@@ -1353,26 +1712,50 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/clean": {
+          const cleared = await clearMessageQueue()
+          broadcastLog(`[指令 /clean] 已清空队列 ${cleared} 条`, "INFO")
+          await reportCommandResult(lock.port, claimed.messageId, true,
+            `✅ 已清空消息队列，共移除 ${cleared} 条`)
+          break
+        }
+
+        case "/reset": {
+          stopAgent()
+          lastAgentLaunchTime = 0
+          saveConfig({ agentSkipContinueNextLaunch: true })
+          broadcastLog("[指令 /reset] 已记录：下次拉起 Agent 不带 --continue；已停止当前 Agent（若曾运行）", "INFO")
+          await reportCommandResult(
+            lock.port,
+            claimed.messageId,
+            true,
+            "✅ 已停止并重置当前会话, 请重新发消息开启新会话",
+          )
+          break
+        }
+
         case "/help": {
           const helpLines = [
-            "  /stop    — 停止当前运行中的 Agent",
-            "  /status  — 查看 Agent / Daemon 状态",
-            "  /list    — 查看消息队列列表（不消费）",
-            "  /task    — 查看定时任务列表",
-            "  /restart — 停止 Agent + 清空队列 + 重启 Daemon",
-            "  /help    — 显示可用指令列表",
+            "💡 可用指令：",
+            "🔹 /status 运行状态",
+            "🔹 /restart 重启应用",
+            "🔹 /stop 停止Agent",
+            "🔹 /reset 重置会话",
+            "🔹 /list 消息队列",
+            "🔹 /clean 清空队列",
+            "🔹 /task 定时任务",
+            "🔹 /help 指令列表",
           ]
-          await reportCommandResult(lock.port, claimed.messageId, true,
-            `可用指令：\n${helpLines.join("\n")}`)
+          await reportCommandResult(lock.port, claimed.messageId, true, helpLines.join("\n"))
           break
         }
 
         default:
-          await reportCommandResult(lock.port, claimed.messageId, false, `未知指令: ${claimed.command}`)
+          await reportCommandResult(lock.port, claimed.messageId, false, `😅 未知指令: ${head}`)
       }
     } catch (e: unknown) {
-      broadcastLog(`[指令] ${claimed.command} 执行异常: ${e instanceof Error ? e.message : e}`, "ERROR")
-      try { await reportCommandResult(lock.port, claimed.messageId, false, `执行异常: ${e instanceof Error ? e.message : e}`) } catch { /* ignore */ }
+      broadcastLog(`[指令] ${rawCmd} 执行异常: ${e instanceof Error ? e.message : e}`, "ERROR")
+      try { await reportCommandResult(lock.port, claimed.messageId, false, `❌ 执行异常: ${e instanceof Error ? e.message : e}`) } catch { /* ignore */ }
     }
   }
 }
@@ -1457,6 +1840,8 @@ export interface McpServerEntry {
 
 function spawnAsync(args: string[], cwd: string, env: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    const mcpLabel = args.length >= 2 && args[0] === "mcp" ? `mcp-${args[1]}` : `mcp-${args[0] ?? "spawn"}`
+    logCursorAgentInvocation(mcpLabel, args, cwd)
     let stdout = "", stderr = ""
     const child = agentNodePath && agentIndexPath
       ? spawn(agentNodePath, [agentIndexPath, ...args], {
@@ -1480,25 +1865,39 @@ function isEnabledStatus(status: string): boolean {
   return s !== "disabled" && !s.includes("not loaded")
 }
 
+/** 合并并发 `mcp list`，避免启动时 StrictMode 双 effect 等导致同一时刻两次 CLI */
+let getMcpEnabledMapInFlight: Promise<Record<string, boolean>> | null = null
+
 export async function getMcpEnabledMap(): Promise<Record<string, boolean>> {
   const config = getConfig()
-  if (!config.workspaceDir || !resolveAgentBinary()) return {}
-
-  const env: Record<string, string> = { ...process.env as Record<string, string> }
-  applyProxyEnv(env, config)
-
-  try {
-    const r = await spawnAsync(["mcp", "list"], config.workspaceDir, env)
-    const clean = r.stdout.replace(ANSI_RE, "").replace(/\r/g, "")
-    const result: Record<string, boolean> = {}
-    for (const line of clean.split("\n")) {
-      const m = line.match(/^(.+?):\s+(.+)$/)
-      if (m) result[m[1].trim()] = isEnabledStatus(m[2].trim())
-    }
-    return result
-  } catch {
+  if (!config.workspaceDir || !resolveAgentBinary()) {
     return {}
   }
+  if (getMcpEnabledMapInFlight) {
+    return getMcpEnabledMapInFlight
+  }
+  const p = (async (): Promise<Record<string, boolean>> => {
+    const env: Record<string, string> = { ...process.env as Record<string, string> }
+    applyProxyEnv(env, config)
+    try {
+      const r = await spawnAsync(["mcp", "list"], config.workspaceDir, env)
+      const clean = r.stdout.replace(ANSI_RE, "").replace(/\r/g, "")
+      const result: Record<string, boolean> = {}
+      for (const line of clean.split("\n")) {
+        const m = line.match(/^(.+?):\s+(.+)$/)
+        if (m) {
+          result[m[1].trim()] = isEnabledStatus(m[2].trim())
+        }
+      }
+      return result
+    } catch {
+      return {}
+    } finally {
+      getMcpEnabledMapInFlight = null
+    }
+  })()
+  getMcpEnabledMapInFlight = p
+  return p
 }
 
 export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
@@ -1663,6 +2062,7 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
 
     let output = ""
     broadcastLog(`[MCP Login] 正在认证 "${serverName}"...`)
+    logCursorAgentInvocation("mcp-login", args, config.workspaceDir)
 
     try {
       if (agentNodePath && agentIndexPath) {

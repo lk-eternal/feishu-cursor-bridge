@@ -95,6 +95,8 @@ export default function Settings({ onBack }: Props) {
   const [cronPreviewErr, setCronPreviewErr] = useState<string | null>(null)
   const [cronPreviewLoading, setCronPreviewLoading] = useState(false)
   const cronPreviewReq = useRef(0)
+  /** 用于区分「同一条任务里只改 cron」与「切换到另一条任务」，切换任务时立即清空预览避免串台 */
+  const cronPreviewTaskIdRef = useRef("")
 
   const loaded = useRef(false)
   const mcpLoaded = useRef(false)
@@ -159,25 +161,34 @@ export default function Settings({ onBack }: Props) {
 
   useEffect(() => { autoSave() }, [autoSave])
 
+  const taskModalOpen = taskEditing !== null
+  const taskIdForCronPreview = taskEditing?.id ?? ""
+  const taskCronForPreview = taskEditing?.cron ?? ""
+
   useEffect(() => {
-    if (!taskEditing) {
+    if (!taskModalOpen) {
+      cronPreviewTaskIdRef.current = ""
       setCronPreviewRuns(null)
       setCronPreviewErr(null)
       setCronPreviewLoading(false)
       return
     }
-    const cron = taskEditing.cron.trim()
+    const cron = taskCronForPreview.trim()
     if (!cron) {
       setCronPreviewRuns(null)
       setCronPreviewErr(null)
       setCronPreviewLoading(false)
       return
     }
+    if (cronPreviewTaskIdRef.current !== taskIdForCronPreview) {
+      cronPreviewTaskIdRef.current = taskIdForCronPreview
+      setCronPreviewRuns(null)
+      setCronPreviewErr(null)
+    }
     const req = ++cronPreviewReq.current
     const t = setTimeout(async () => {
       if (req !== cronPreviewReq.current) return
       setCronPreviewLoading(true)
-      setCronPreviewRuns(null)
       setCronPreviewErr(null)
       try {
         const r = await window.electronAPI.previewCronNextRuns(cron)
@@ -185,6 +196,7 @@ export default function Settings({ onBack }: Props) {
         if (r.ok) {
           setCronPreviewRuns(r.runs)
         } else {
+          setCronPreviewRuns(null)
           setCronPreviewErr(r.error)
         }
       } finally {
@@ -192,7 +204,7 @@ export default function Settings({ onBack }: Props) {
       }
     }, 320)
     return () => clearTimeout(t)
-  }, [taskEditing])
+  }, [taskModalOpen, taskIdForCronPreview, taskCronForPreview])
 
   const fetchModels = async () => {
     setLoadingModels(true)
@@ -696,8 +708,16 @@ export default function Settings({ onBack }: Props) {
                   每 5 秒请用 <code className="rounded bg-gray-800 px-1">*/5 * * * * *</code>，勿用 <code className="rounded bg-gray-800 px-1">0/5</code>（在 node-cron 里会变成每分钟一次）。
                 </p>
                 <div className="mt-2 rounded-lg border border-gray-800 bg-gray-900/80 px-3 py-2">
-                  <p className="text-xs font-medium text-gray-500">最近 5 次触发（本地时间）</p>
-                  {cronPreviewLoading && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-xs font-medium text-gray-500">最近 5 次触发（本地时间）</p>
+                    {cronPreviewLoading && cronPreviewRuns && cronPreviewRuns.length > 0 && (
+                      <span className="flex items-center gap-1 text-[11px] text-gray-500">
+                        <Loader2 size={11} className="animate-spin shrink-0" />
+                        更新中…
+                      </span>
+                    )}
+                  </div>
+                  {cronPreviewLoading && (!cronPreviewRuns || cronPreviewRuns.length === 0) && (
                     <p className="mt-1 flex items-center gap-1.5 text-xs text-gray-500">
                       <Loader2 size={12} className="animate-spin" />计算中…
                     </p>
@@ -705,8 +725,8 @@ export default function Settings({ onBack }: Props) {
                   {!cronPreviewLoading && cronPreviewErr && (
                     <p className="mt-1 text-xs text-amber-400/90">{cronPreviewErr}</p>
                   )}
-                  {!cronPreviewLoading && !cronPreviewErr && cronPreviewRuns && cronPreviewRuns.length > 0 && (
-                    <ol className="mt-1.5 list-decimal space-y-0.5 pl-4 font-mono text-[11px] leading-relaxed text-gray-400">
+                  {cronPreviewRuns && cronPreviewRuns.length > 0 && (
+                    <ol className={`mt-1.5 list-decimal space-y-0.5 pl-4 font-mono text-[11px] leading-relaxed text-gray-400 ${cronPreviewLoading ? "opacity-70" : ""}`}>
                       {cronPreviewRuns.map((line, i) => (
                         <li key={`${line}-${i}`}>{line}</li>
                       ))}

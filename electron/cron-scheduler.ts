@@ -70,3 +70,17 @@ export function previewCronNextRuns(expression: string): { ok: true; runs: strin
   }
 }
 
+/**
+ * 下一次计划触发时间（本地），用于 /task ls 等；失败时返回说明性短句。
+ *
+ * @param expression cron 表达式
+ * @returns 已格式化的本地时间字符串或错误说明
+ */
+export function getNextCronFireLabel(expression: string): string {
+  const r = previewCronNextRuns(expression.trim())
+  if (!r.ok) {
+    return `无法推算（${r.error}）`
+  }
+  return r.runs[0] ?? "—"
+}
+

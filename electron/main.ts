@@ -240,7 +240,8 @@ function registerIpcHandlers(): void {
       env.NO_PROXY = config.noProxy
       env.no_proxy = config.noProxy
     }
-    const run = execAgentSync(["--list-models"], env, 30_000)
+    const ws = config.workspaceDir?.trim() || undefined
+    const run = execAgentSync(["--list-models"], env, { timeoutMs: 30_000, logLabel: "list-models", cwd: ws })
     if (!run.ok) {
       return { ok: false, models: [], error: run.error || run.stderr.trim() || "获取模型列表失败" }
     }

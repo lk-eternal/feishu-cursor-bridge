@@ -472,7 +472,9 @@ const COMMANDS: Record<string, string> = {
   "/stop": "停止当前运行中的 Agent",
   "/status": "查看 Agent / Daemon 状态",
   "/list": "查看消息队列列表（不消费）",
-  "/task": "查看定时任务列表",
+  "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
+  "/clean": "清空消息队列",
+  "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
   "/help": "显示可用指令列表",
 };
@@ -480,10 +482,6 @@ const COMMANDS: Record<string, string> = {
 function isCommand(text: string): boolean {
   const trimmed = text.trim().toLowerCase();
   return Object.keys(COMMANDS).some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
-}
-
-function extractCommand(text: string): string {
-  return text.trim().toLowerCase().split(/\s+/)[0];
 }
 
 async function replyToMessage(messageId: string, text: string): Promise<void> {
@@ -588,9 +586,9 @@ function cleanCommandMessagesFromQueue(): void {
 }
 
 async function handleCommand(text: string, messageId: string): Promise<void> {
-  const cmd = extractCommand(text);
-  log("INFO", `处理指令: ${cmd} (msgId=${messageId})`);
-  pushCommandToQueue(cmd, messageId, `daemon-${process.pid}`);
+  const trimmed = text.trim();
+  log("INFO", `处理指令: ${trimmed} (msgId=${messageId})`);
+  pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`);
   setTimeout(() => cleanCommandMessagesFromQueue(), 2000);
 }
 
@@ -745,8 +743,7 @@ function startHttpServer(): Promise<number> {
           const body = JSON.parse(await readBody(req)) as { messageId: string; ok: boolean; message: string };
           log("INFO", `指令执行完成: ok=${body.ok}, msgId=${body.messageId}`);
           if (body.messageId) {
-            const icon = body.ok ? "✅" : "❌";
-            await replyToMessage(body.messageId, `${icon} ${body.message}`);
+            await replyToMessage(body.messageId, `${body.message}`);
           }
           json(res, { ok: true });
           return;

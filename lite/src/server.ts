@@ -234,15 +234,11 @@ async function processIncomingMessage(messageId: string, messageType: string, co
   return parts.join("\n");
 }
 
-const COMMANDS = ["/stop", "/status", "/list", "/task", "/restart", "/help"];
+const COMMANDS = ["/stop", "/status", "/list", "/task", "/clean", "/reset", "/restart", "/help"];
 
 function isCommand(text: string): boolean {
   const trimmed = text.trim().toLowerCase();
   return COMMANDS.some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
-}
-
-function extractCommand(text: string): string {
-  return text.trim().toLowerCase().split(/\s+/)[0];
 }
 
 function pushCommandToQueue(command: string, messageId: string): void {
@@ -303,8 +299,7 @@ function startLarkConnection(): void {
         }
 
         if (messageType === "text" && isCommand(text)) {
-          const cmd = extractCommand(text);
-          pushCommandToQueue(cmd, messageId);
+          pushCommandToQueue(text.trim(), messageId);
           return;
         }
 
@@ -326,7 +321,7 @@ function startLarkConnection(): void {
 
 // ── MCP Server ──────────────────────────────────────────
 
-const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.4.6", description: "飞书消息桥接 – 通过飞书与用户沟通" });
+const mcpServer = new McpServer({ name: "feishu-cursor-bridge", version: "2.4.7", description: "飞书消息桥接 – 通过飞书与用户沟通" });
 
 mcpServer.tool(
   "sync_message",
@@ -375,7 +370,7 @@ export async function main(): Promise<void> {
   }
 
   log("INFO", "════════════════════════════════════════════════");
-  log("INFO", `feishu-cursor-bridge MCP v2.4.6 启动 (PID=${process.pid})`);
+  log("INFO", `feishu-cursor-bridge MCP v2.4.7 启动 (PID=${process.pid})`);
   log("INFO", "════════════════════════════════════════════════");
 
   const queueDir = initFileQueue(APP_ID);
