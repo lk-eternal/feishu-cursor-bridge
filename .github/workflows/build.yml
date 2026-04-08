@@ -102,9 +102,8 @@ jobs:
         with:
           draft: false
           generate_release_notes: true
-          # 顺序上传，避免多资产并行覆盖同名资源时 GitHub API 404（update-release-asset）
-          preserve_order: true
           overwrite_files: true
+          # 根本修复：下方 files 显式列出资源，避免 **/*.yml 等多余/重名资产；并行上传即可，不必强制顺序
           # 勿用 **/*.yml，会带上 builder-debug.yml 等且可能与 latest.yml 争用同名资产
           files: |
             artifacts/**/feishu-cursor-bridge-setup-*.exe

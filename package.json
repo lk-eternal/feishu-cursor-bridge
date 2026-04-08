@@ -31,7 +31,10 @@
     "preview": "electron-vite preview",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
-    "dist:mac": "npm run build && electron-builder --mac"
+    "dist:mac": "npm run build && electron-builder --mac",
+    "pack:win": "npm run build && electron-builder --win --dir",
+    "pack:mac": "npm run build && electron-builder --mac --dir",
+    "pack:linux": "npm run build && electron-builder --linux --dir"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
