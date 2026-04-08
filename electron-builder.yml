@@ -6,6 +6,9 @@ publish:
   provider: github
   owner: lk-eternal
   repo: feishu-cursor-bridge
+  vPrefixedTagName: true
+
+afterPack: scripts/after-pack.cjs
 
 directories:
   buildResources: resources
