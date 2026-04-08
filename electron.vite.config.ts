@@ -5,7 +5,17 @@ import tailwindcss from "@tailwindcss/vite"
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ["electron-store", "node-cron", "cron-parser"] })],
+    plugins: [
+      externalizeDepsPlugin({
+        exclude: [
+          "electron-store",
+          "electron-updater",
+          "node-cron",
+          "cron-parser",
+          "semver",
+        ],
+      }),
+    ],
     build: {
       rollupOptions: {
         input: {
