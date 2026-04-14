@@ -22,6 +22,11 @@
     "lark-bridge-mcp": "dist/index.js",
     "lark-bridge-daemon": "dist/daemon-entry.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts"
+  ],
   "scripts": {
     "build:mcp": "tsc",
     "build:bundle": "node scripts/bundle-daemon.cjs",
