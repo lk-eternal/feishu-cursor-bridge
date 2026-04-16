@@ -444,13 +444,12 @@ function writeLockFile(port: number): void {
     pid: process.pid, port, version: PKG_VERSION,
     startedAt: localTimestamp(), workspaceDir: WORKSPACE_DIR,
   }));
-  log("INFO", `Lock 文件已写入: ${lockPath}`);
 }
 
 function removeLockFile(): void {
   try {
     const lockPath = getLockFilePath();
-    if (fs.existsSync(lockPath)) { fs.unlinkSync(lockPath); log("INFO", "Lock 文件已清理"); }
+    if (fs.existsSync(lockPath)) { fs.unlinkSync(lockPath); }
   } catch { /* ignore */ }
 }
 
@@ -462,15 +461,9 @@ export async function daemonMain(): Promise<void> {
     process.exit(1);
   }
 
-  if (savedProxyKeys.length > 0) {
-    log("INFO", `已剥离代理环境变量 (${savedProxyKeys.join(", ")})，飞书连接将直连`);
-  }
-
-  log("INFO", "════════════════════════════════════════════════");
-  log("INFO", `lark-bridge-daemon v${PKG_VERSION} 启动`);
+  log("INFO", `Daemon v${PKG_VERSION} 启动`);
   log("INFO", `workspace: ${WORKSPACE_DIR}`);
   log("INFO", `日志文件: ${LOG_FILE_PATH}`);
-  log("INFO", "════════════════════════════════════════════════");
 
   const cleanup = () => {
     stopDaemonScheduledTasks();
@@ -497,5 +490,5 @@ export async function daemonMain(): Promise<void> {
     },
   );
 
-  log("INFO", `守护进程就绪 ✓ port=${daemonPort}`);
+  log("INFO", `Daemon 就绪 ✓ port=${daemonPort}`);
 }

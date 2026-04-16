@@ -170,7 +170,6 @@ function reloadTasks(cb: SchedulerCallbacks): void {
     log(`无活跃定时任务 (共 ${tasks.length} 个)`);
     return;
   }
-  log(`加载 ${enabled.length} 个定时任务`);
   for (const task of enabled) {
     if (!isValidCron(task.cron)) {
       log(`无效的 cron 表达式: "${task.cron}" (任务: ${task.name})`);
@@ -228,7 +227,7 @@ export function startDaemonScheduledTasks(enqueue: (content: string) => void, la
   const cb: SchedulerCallbacks = { enqueue, launchIndependent };
   reloadTasks(cb);
   startFileWatcher(cb);
-  log(`调度器已启动 (${scheduledTasksSnapshot.length} 个活跃任务，每 ${WATCHDOG_MS / 1000}s 时钟扫描)`);
+  log(`调度器已启动 (${scheduledTasksSnapshot.length} 个活跃任务)`);
 }
 
 export function stopDaemonScheduledTasks(): void {

@@ -101,6 +101,7 @@ export interface DaemonStatus {
   agentPid?: number | null
   cliAvailable?: boolean
   error?: string
+  model?: string
   /** 配置中的工作目录与当前仍在运行的 Daemon 实例不一致 */
   workspaceMismatch?: boolean
   /** 当前 Daemon 实际使用的工作目录（与设置不一致时有值） */
@@ -184,6 +185,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
 
   const statusFromHealth = (port: number, health: Record<string, unknown>): DaemonStatus => {
     cachedPort = port
+    const cfgModel = config.model?.trim() || "auto"
     const status: DaemonStatus = {
       running: true,
       version: health.version as string,
@@ -193,6 +195,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       autoOpenId: health.autoOpenId as string | null,
       agentRunning: isAgentRunning(),
       agentPid: agentChild?.pid ?? null,
+      model: cfgModel,
     }
     if (status.autoOpenId && !config.larkReceiveId) {
       saveConfig({ larkReceiveId: status.autoOpenId, larkReceiveIdType: "open_id" })
@@ -1022,13 +1025,9 @@ export function launchIndependentAgent(taskId: string, taskName: string, message
  * @param cwd 子进程工作目录（若有）
  */
 function logCursorAgentInvocation(logLabel: string, agentArgs: string[], cwd?: string): void {
-  const cwdSuffix = cwd != null && cwd !== "" ? ` cwd=${cwd}` : ""
-  if (agentNodePath && agentIndexPath) {
-    const argv = [agentIndexPath, ...agentArgs]
-    pushUiLog("Agent", "INFO", `[CLI ${logLabel}] ${agentNodePath} ${JSON.stringify(argv)}${cwdSuffix}`)
-  } else {
-    pushUiLog("Agent", "INFO", `[CLI ${logLabel}] agent ${JSON.stringify(agentArgs)}${cwdSuffix}`)
-  }
+  const cwdSuffix = cwd != null && cwd !== "" ? `${cwd} ` : ""
+  const argsString = agentArgs.join(' ')
+  pushUiLog("Agent", "INFO", `[CLI ${logLabel}] ${cwdSuffix}agent ${argsString}`)
 }
 
 /** 工作区从未对话过时，`agent --continue` 会输出并退出 */

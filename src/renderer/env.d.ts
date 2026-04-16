@@ -59,6 +59,7 @@ interface DaemonStatus {
   agentPid?: number | null
   cliAvailable?: boolean
   error?: string
+  model?: string
   workspaceMismatch?: boolean
   daemonWorkspaceDir?: string
 }

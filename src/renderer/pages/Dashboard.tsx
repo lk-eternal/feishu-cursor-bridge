@@ -36,9 +36,12 @@ export default function Dashboard({ onSettings }: Props) {
   const [cliMessage, setCliMessage] = useState("")
   const [stoppingAgent, setStoppingAgent] = useState(false)
   const [clearingQueue, setClearingQueue] = useState(false)
+  const [configModel, setConfigModel] = useState("")
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
+    window.electronAPI.getConfig().then((cfg) => setConfigModel(cfg.model?.trim() || "auto"))
+
     const refresh = async () => {
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
@@ -332,9 +335,9 @@ export default function Dashboard({ onSettings }: Props) {
         <StatusCard
           icon={Bot}
           label="Agent"
-          value={status.agentRunning ? "会话中" : "空闲"}
+          value={status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"}
           color={status.agentRunning ? "blue" : "gray"}
-          sub={status.agentPid ? `PID: ${status.agentPid}` : undefined}
+          sub={`模型: ${status.model || configModel || "auto"}`}
           action={status.agentRunning ? (
             <button
               onClick={handleStopAgent}
@@ -548,19 +551,21 @@ function StatusCard({
   }
 
   return (
-    <div className="rounded-lg border border-gray-800 p-3">
-      <div className="mb-2 flex items-center justify-between">
+    <div className="flex h-[88px] flex-col rounded-lg border border-gray-800 p-3">
+      <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Icon size={14} className={colors[color]} />
           <span className="text-xs text-gray-500">{label}</span>
         </div>
-        {action}
+        <div className="min-w-0">{action}</div>
       </div>
-      <div className="flex items-center gap-2">
-        <div className={`h-2 w-2 rounded-full ${dotColors[color]}`} />
-        <span className={`text-sm font-medium ${colors[color]}`}>{value}</span>
+      <div className="mt-auto">
+        <div className="flex items-center gap-2">
+          <div className={`h-2 w-2 shrink-0 rounded-full ${dotColors[color]}`} />
+          <span className={`text-sm font-medium ${colors[color]}`}>{value}</span>
+        </div>
+        <div className="mt-1 h-4 truncate text-xs text-gray-600">{sub ?? "\u00A0"}</div>
       </div>
-      {sub && <div className="mt-1 truncate text-xs text-gray-600">{sub}</div>}
     </div>
   )
 }
