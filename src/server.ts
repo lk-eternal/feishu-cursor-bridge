@@ -33,6 +33,7 @@ const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
 const RECEIVE_ID = process.env.LARK_RECEIVE_ID ?? "";
 const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
+const HAS_DAEMON = !!process.env.LARK_DAEMON_PORT;
 
 stripProxyEnv();
 
@@ -186,7 +187,11 @@ export async function main(): Promise<void> {
   cleanupStaleMessages();
 
   await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
-  startLarkConnection();
+  if (HAS_DAEMON) {
+    log("INFO", "检测到 Daemon 运行中，MCP 不建立飞书 WebSocket 连接");
+  } else {
+    startLarkConnection();
+  }
 
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
