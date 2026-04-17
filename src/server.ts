@@ -170,6 +170,14 @@ mcpServer.tool(
   async ({ file_path }) => { await sender.sendFile(file_path); return { content: [{ type: "text" as const, text: "文件已发送" }] }; },
 );
 
+// ── 应用管理工具（仅在 Daemon 模式下注册）─────────────────
+
+import { registerAdminTools } from "./server-admin.js";
+
+if (HAS_DAEMON) {
+  registerAdminTools(mcpServer);
+}
+
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function main(): Promise<void> {

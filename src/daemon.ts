@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
 import { createRequire } from "node:module";
 import {
   startDaemonScheduledTasks,
@@ -301,6 +302,8 @@ function startHttpServer(): Promise<number> {
       const method = req.method;
 
       try {
+        if (await handleAdminApi(pathname, method!, req, res)) return;
+
         if (method === "GET" && (pathname === "/health" || pathname === "/status")) {
           cleanExpiredCommands();
           json(res, {
@@ -428,6 +431,267 @@ function startHttpServer(): Promise<number> {
       resolve(addr.port);
     });
   });
+}
+
+// ── 管理 API 辅助函数 ────────────────────────────────────
+
+const HOME_DIR = os.homedir();
+const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json");
+const PROJECT_MCP_PATH = path.join(WORKSPACE_DIR, ".cursor", "mcp.json");
+const RULES_DIR = path.join(WORKSPACE_DIR, ".cursor", "rules");
+const SKILLS_DIR = path.join(HOME_DIR, ".cursor", "skills");
+const TASKS_FILE = path.join(HOME_DIR, ".lark-bridge-mcp", "scheduled-tasks.json");
+
+function readJsonSafe(filePath: string): any {
+  try {
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+  } catch { /* ignore */ }
+  return null;
+}
+
+function writeJsonSafe(filePath: string, data: unknown): void {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+}
+
+interface TaskEntry { id: string; name: string; cron: string; content: string; enabled: boolean; independent?: boolean }
+
+function readTasks(): TaskEntry[] {
+  const data = readJsonSafe(TASKS_FILE);
+  return Array.isArray(data) ? data : [];
+}
+
+function writeTasks(tasks: TaskEntry[]): void {
+  writeJsonSafe(TASKS_FILE, tasks);
+}
+
+// ── 管理 API 路由处理 ────────────────────────────────────
+
+async function handleAdminApi(pathname: string, method: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<boolean> {
+  if (!pathname.startsWith("/api/")) return false;
+
+  if (method === "GET" && pathname === "/api/status") {
+    const tasks = readTasks();
+    json(res, {
+      daemon: { running: true, version: PKG_VERSION, uptime: Math.floor(process.uptime()), port: daemonPort },
+      queue: { length: getFileQueueLength() },
+      tasks: { total: tasks.length, enabled: tasks.filter((t) => t.enabled).length },
+      feishu: { connected: true, hasTarget: !!sender.getTarget() },
+    });
+    return true;
+  }
+
+  // ── MCP 管理 ──
+  if (pathname === "/api/mcp") {
+    if (method === "GET") {
+      const globalCfg = readJsonSafe(GLOBAL_MCP_PATH);
+      const projectCfg = readJsonSafe(PROJECT_MCP_PATH);
+      const servers: Record<string, { config: unknown; scope: string }> = {};
+      if (globalCfg?.mcpServers) {
+        for (const [k, v] of Object.entries(globalCfg.mcpServers)) servers[k] = { config: v, scope: "global" };
+      }
+      if (projectCfg?.mcpServers) {
+        for (const [k, v] of Object.entries(projectCfg.mcpServers)) servers[k] = { config: v, scope: "project" };
+      }
+      json(res, { ok: true, servers });
+      return true;
+    }
+    if (method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const { action, name, config, scope } = body as { action: string; name?: string; config?: string; scope?: string };
+      const targetPath = (scope ?? "global") === "project" ? PROJECT_MCP_PATH : GLOBAL_MCP_PATH;
+
+      if (action === "add") {
+        if (!name || !config) { json(res, { ok: false, error: "name and config required" }, 400); return true; }
+        let parsed: unknown;
+        try { parsed = JSON.parse(config); } catch { json(res, { ok: false, error: "invalid config JSON" }, 400); return true; }
+        const mcpJson = readJsonSafe(targetPath) ?? {};
+        if (!mcpJson.mcpServers) mcpJson.mcpServers = {};
+        mcpJson.mcpServers[name] = parsed;
+        writeJsonSafe(targetPath, mcpJson);
+        json(res, { ok: true, message: `${name} saved` });
+        return true;
+      }
+      if (action === "delete") {
+        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+        for (const p of [GLOBAL_MCP_PATH, PROJECT_MCP_PATH]) {
+          const mcpJson = readJsonSafe(p);
+          if (mcpJson?.mcpServers?.[name]) {
+            delete mcpJson.mcpServers[name];
+            writeJsonSafe(p, mcpJson);
+            json(res, { ok: true, message: `${name} deleted` });
+            return true;
+          }
+        }
+        json(res, { ok: false, error: "not found" }, 404);
+        return true;
+      }
+      json(res, { ok: false, error: "unknown action" }, 400);
+      return true;
+    }
+  }
+
+  // ── Rules 管理 ──
+  if (pathname === "/api/rules") {
+    if (method === "GET") {
+      if (!fs.existsSync(RULES_DIR)) { json(res, { ok: true, rules: [] }); return true; }
+      const files = fs.readdirSync(RULES_DIR).filter((f) => f.endsWith(".mdc") || f.endsWith(".md"));
+      json(res, { ok: true, rules: files });
+      return true;
+    }
+    if (method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const { action, name, content } = body as { action: string; name?: string; content?: string };
+
+      if (action === "read") {
+        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+        const fp = path.join(RULES_DIR, name);
+        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+        json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
+        return true;
+      }
+      if (action === "save") {
+        if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
+        let fileName = name.trim();
+        if (!fileName.endsWith(".mdc") && !fileName.endsWith(".md")) fileName += ".mdc";
+        if (!fs.existsSync(RULES_DIR)) fs.mkdirSync(RULES_DIR, { recursive: true });
+        fs.writeFileSync(path.join(RULES_DIR, fileName), content, "utf-8");
+        json(res, { ok: true, message: `${fileName} saved` });
+        return true;
+      }
+      if (action === "delete") {
+        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+        const fp = path.join(RULES_DIR, name);
+        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+        fs.unlinkSync(fp);
+        json(res, { ok: true, message: `${name} deleted` });
+        return true;
+      }
+      json(res, { ok: false, error: "unknown action" }, 400);
+      return true;
+    }
+  }
+
+  // ── Skills 管理 ──
+  if (pathname === "/api/skills") {
+    if (method === "GET") {
+      if (!fs.existsSync(SKILLS_DIR)) { json(res, { ok: true, skills: [] }); return true; }
+      const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory());
+      const skills = dirs.map((d) => {
+        const skillFile = path.join(SKILLS_DIR, d.name, "SKILL.md");
+        const preview = fs.existsSync(skillFile) ? fs.readFileSync(skillFile, "utf-8").split("\n")[0].slice(0, 80) : "";
+        return { name: d.name, preview };
+      });
+      json(res, { ok: true, skills });
+      return true;
+    }
+    if (method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const { action, name, content } = body as { action: string; name?: string; content?: string };
+
+      if (action === "read") {
+        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+        const fp = path.join(SKILLS_DIR, name, "SKILL.md");
+        if (!fs.existsSync(fp)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+        json(res, { ok: true, content: fs.readFileSync(fp, "utf-8") });
+        return true;
+      }
+      if (action === "save") {
+        if (!name || content === undefined) { json(res, { ok: false, error: "name and content required" }, 400); return true; }
+        const dir = path.join(SKILLS_DIR, name.trim());
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, "SKILL.md"), content, "utf-8");
+        json(res, { ok: true, message: `${name} saved` });
+        return true;
+      }
+      if (action === "delete") {
+        if (!name) { json(res, { ok: false, error: "name required" }, 400); return true; }
+        const dir = path.join(SKILLS_DIR, name);
+        if (!fs.existsSync(dir)) { json(res, { ok: false, error: "not found" }, 404); return true; }
+        fs.rmSync(dir, { recursive: true, force: true });
+        json(res, { ok: true, message: `${name} deleted` });
+        return true;
+      }
+      json(res, { ok: false, error: "unknown action" }, 400);
+      return true;
+    }
+  }
+
+  // ── Tasks 管理 ──
+  if (pathname === "/api/tasks") {
+    if (method === "GET") {
+      json(res, { ok: true, tasks: readTasks() });
+      return true;
+    }
+    if (method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const { action, id, name, cron, content, enabled, independent } = body as {
+        action: string; id?: string; name?: string; cron?: string; content?: string; enabled?: boolean; independent?: boolean
+      };
+      const tasks = readTasks();
+
+      if (action === "add") {
+        if (!name || !cron || !content) { json(res, { ok: false, error: "name, cron, content required" }, 400); return true; }
+        const newTask: TaskEntry = { id: crypto.randomUUID(), name: name.trim(), cron: cron.trim(), content, enabled: enabled ?? true, independent: independent ?? true };
+        tasks.push(newTask);
+        writeTasks(tasks);
+        json(res, { ok: true, task: newTask });
+        return true;
+      }
+      if (!id) { json(res, { ok: false, error: "id required" }, 400); return true; }
+      const idx = tasks.findIndex((t) => t.id === id);
+      if (idx === -1) { json(res, { ok: false, error: "task not found" }, 404); return true; }
+
+      if (action === "update") {
+        if (name !== undefined) tasks[idx].name = name.trim();
+        if (cron !== undefined) tasks[idx].cron = cron.trim();
+        if (content !== undefined) tasks[idx].content = content;
+        if (enabled !== undefined) tasks[idx].enabled = enabled;
+        if (independent !== undefined) tasks[idx].independent = independent;
+        writeTasks(tasks);
+        json(res, { ok: true, task: tasks[idx] });
+        return true;
+      }
+      if (action === "delete") {
+        const removed = tasks.splice(idx, 1)[0];
+        writeTasks(tasks);
+        json(res, { ok: true, removed });
+        return true;
+      }
+      if (action === "toggle") {
+        tasks[idx].enabled = !tasks[idx].enabled;
+        writeTasks(tasks);
+        json(res, { ok: true, task: tasks[idx] });
+        return true;
+      }
+      json(res, { ok: false, error: "unknown action" }, 400);
+      return true;
+    }
+  }
+
+  // ── Agent 控制 ──
+  if (pathname === "/api/agent" && method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const { action } = body as { action: string };
+    const supportedActions = ["stop", "restart", "reset", "clean"];
+
+    if (action === "clean") {
+      const cleared = clearFileQueue();
+      json(res, { ok: true, cleared });
+      return true;
+    }
+    if (supportedActions.includes(action)) {
+      const msgId = `api-${Date.now()}`;
+      pushCommandToQueue(`/${action}`, msgId, `mcp-api`);
+      json(res, { ok: true, message: `/${action} command queued` });
+      return true;
+    }
+    json(res, { ok: false, error: `unknown action, supported: ${supportedActions.join(", ")}` }, 400);
+    return true;
+  }
+
+  return false;
 }
 
 // ── Lock 文件 ────────────────────────────────────────────

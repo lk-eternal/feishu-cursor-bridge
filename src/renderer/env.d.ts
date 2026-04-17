@@ -139,6 +139,8 @@ interface ElectronAPI {
   loginMcp(name: string): Promise<{ ok: boolean; output: string }>
   toggleMcp(name: string, enabled: boolean): Promise<{ ok: boolean; output: string }>
   getMcpEnabledMap(force?: boolean): Promise<Record<string, boolean>>
+  getMcpStatusMap(force?: boolean): Promise<Record<string, string>>
+  getMcpTools(name: string): Promise<{ ok: boolean; tools: { name: string; description?: string; params?: { name: string; type?: string; description?: string; required?: boolean }[] }[]; error?: string }>
   getRules(): Promise<{ name: string; content: string }[]>
   saveRule(name: string, content: string): Promise<{ ok: boolean }>
   deleteRule(name: string): Promise<{ ok: boolean }>

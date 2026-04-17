@@ -24,6 +24,8 @@ import {
   Bot,
   Download,
   Play,
+  ChevronDown,
+  Wrench,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
@@ -88,6 +90,19 @@ export default function Settings({ onBack }: Props) {
   const [mcpStatusLoading, setMcpStatusLoading] = useState(true)
   const [mcpEditing, setMcpEditing] = useState<McpEditForm | null>(null)
   const [mcpEditOriginalName, setMcpEditOriginalName] = useState<string | null>(null)
+  const [mcpExpanded, setMcpExpanded] = useState<string | null>(null)
+  const [mcpTools, setMcpTools] = useState<Record<string, { loading: boolean; tools: { name: string; description?: string; params?: { name: string; type?: string; description?: string; required?: boolean }[] }[]; error?: string }>>({})
+  const [mcpStatus, setMcpStatus] = useState<Record<string, string>>({})
+
+  const toggleMcpExpand = async (name: string) => {
+    if (mcpExpanded === name) { setMcpExpanded(null); return }
+    setMcpExpanded(name)
+    if (!mcpTools[name]) {
+      setMcpTools((p) => ({ ...p, [name]: { loading: true, tools: [] } }))
+      const res = await window.electronAPI.getMcpTools(name)
+      setMcpTools((p) => ({ ...p, [name]: { loading: false, tools: res.tools, error: res.ok ? undefined : res.error } }))
+    }
+  }
 
   const [rules, setRules] = useState<RuleFile[]>([])
   const [ruleEditing, setRuleEditing] = useState<RuleFile | null>(null)
@@ -115,9 +130,15 @@ export default function Settings({ onBack }: Props) {
     const servers = await window.electronAPI.getMcpServers()
     setMcpServers(servers)
     setMcpStatusLoading(true)
-    const enabled = await window.electronAPI.getMcpEnabledMap(force)
+    const [enabled, status] = await Promise.all([window.electronAPI.getMcpEnabledMap(force), window.electronAPI.getMcpStatusMap(force)])
     setMcpServers((prev) => prev.map((s) => ({ ...s, enabled: enabled[s.name] ?? false })))
+    setMcpStatus(status)
     setMcpStatusLoading(false)
+    for (const s of servers) {
+      window.electronAPI.getMcpTools(s.name).then((res) => {
+        setMcpTools((p) => ({ ...p, [s.name]: { loading: false, tools: res.tools, error: res.ok ? undefined : res.error } }))
+      })
+    }
   }, [])
   const refreshRules = useCallback(() => { window.electronAPI.getRules().then(setRules) }, [])
   const refreshSkills = useCallback(() => { window.electronAPI.getSkills().then(setSkills) }, [])
@@ -163,7 +184,7 @@ export default function Settings({ onBack }: Props) {
       setCloseWindowAction(config.closeWindowAction ?? "ask")
       loaded.current = true
     })
-    refreshMcpServers(); refreshRules(); refreshSkills(); refreshTasks()
+    refreshMcpServers(true); refreshRules(); refreshSkills(); refreshTasks()
     window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses)
     const unsub1 = window.electronAPI.onMcpLoginComplete(({ serverName, ok }) => {
       if (ok) setMcpServers((prev) => prev.map((s) => s.name === serverName ? { ...s, authenticated: true } : s))
@@ -625,34 +646,72 @@ export default function Settings({ onBack }: Props) {
                   <button onClick={openMcpAdd} className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Plus size={12} />新增</button>
                 </div>
                 <div className="space-y-2">
-                  {mcpServers.map((s) => (
-                    <div key={s.name} className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
-                      <div className="flex items-center gap-3 min-w-0">
-                        {s.type === "url" ? (s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : <ShieldAlert size={16} className="shrink-0 text-amber-400" />) : <Terminal size={16} className="shrink-0 text-gray-400" />}
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2"><p className="truncate text-sm font-medium">{s.name}</p><span className="shrink-0 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{s.source === "global" ? "全局" : "项目"}</span></div>
-                          <p className="truncate text-xs text-gray-500">{s.type === "url" ? s.url : `${s.command} ${(s.args ?? []).join(" ")}`}</p>
+                  {mcpServers.map((s) => {
+                    const expanded = mcpExpanded === s.name
+                    const toolState = mcpTools[s.name]
+                    const rawStatus = mcpStatus[s.name]
+                    const statusColor = !rawStatus ? "text-gray-600" : rawStatus === "ready" ? "text-green-400" : rawStatus === "disabled" || rawStatus.includes("not loaded") ? "text-gray-500" : "text-red-400"
+                    const statusLabel = !rawStatus ? "—" : rawStatus === "ready" ? "ready" : rawStatus === "disabled" ? "disabled" : rawStatus.includes("not loaded") ? "not loaded" : rawStatus
+                    return (
+                    <div key={s.name} className="rounded-lg border border-gray-700 overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <button onClick={() => toggleMcpExpand(s.name)} className="shrink-0 rounded p-0.5 text-gray-500 transition hover:text-white">
+                            <ChevronDown size={14} className={`transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+                          </button>
+                          {s.type === "url" ? (s.authenticated ? <ShieldCheck size={16} className="shrink-0 text-green-400" /> : <ShieldAlert size={16} className="shrink-0 text-amber-400" />) : <Terminal size={16} className="shrink-0 text-gray-400" />}
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <p className="truncate text-sm font-medium">{s.name}</p>
+                              <span className="shrink-0 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{s.source === "global" ? "全局" : "项目"}</span>
+                              {!mcpStatusLoading && <span className={`shrink-0 text-[10px] ${statusColor}`}>{statusLabel}</span>}
+                              {toolState && !toolState.loading && toolState.tools.length > 0 && <span className="shrink-0 rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-500">{toolState.tools.length} tools</span>}
+                            </div>
+                            <p className="truncate text-xs text-gray-500">{s.type === "url" ? s.url : `${s.command} ${(s.args ?? []).join(" ")}`}</p>
+                          </div>
+                        </div>
+                        <div className="ml-3 flex shrink-0 items-center gap-2">
+                          {s.type === "url" && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600/70 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Loader2 size={12} className="animate-spin" />认证中</button> : <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><LogIn size={12} />授权</button>)}
+                          <button onClick={() => openMcpEdit(s)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white"><Pencil size={13} /></button>
+                          <button onClick={() => handleMcpDelete(s.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400"><Trash2 size={13} /></button>
+                          {(mcpStatusLoading && s.enabled === undefined) || mcpLoading[s.name] ? (
+                            <div className="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded-full bg-gray-700">
+                              <Loader2 size={12} className="animate-spin text-gray-400" />
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleMcpToggle(s.name, !s.enabled)}
+                              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${s.enabled ? "bg-green-500" : "bg-gray-600"}`}
+                            >
+                              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${s.enabled ? "translate-x-[18px]" : "translate-x-[3px]"}`} />
+                            </button>
+                          )}
                         </div>
                       </div>
-                      <div className="ml-3 flex shrink-0 items-center gap-2">
-                        {s.type === "url" && (s.authenticated ? <span className="text-xs text-green-400">已认证</span> : mcpLoginPending[s.name] ? <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600/70 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Loader2 size={12} className="animate-spin" />认证中</button> : <button onClick={() => handleMcpLogin(s.name)} className="flex items-center gap-1 rounded-md bg-blue-600 px-2 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><LogIn size={12} />授权</button>)}
-                        <button onClick={() => openMcpEdit(s)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white"><Pencil size={13} /></button>
-                        <button onClick={() => handleMcpDelete(s.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400"><Trash2 size={13} /></button>
-                        {(mcpStatusLoading && s.enabled === undefined) || mcpLoading[s.name] ? (
-                          <div className="inline-flex h-5 w-9 shrink-0 items-center justify-center rounded-full bg-gray-700">
-                            <Loader2 size={12} className="animate-spin text-gray-400" />
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => handleMcpToggle(s.name, !s.enabled)}
-                            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 ${s.enabled ? "bg-green-500" : "bg-gray-600"}`}
-                          >
-                            <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${s.enabled ? "translate-x-[18px]" : "translate-x-[3px]"}`} />
-                          </button>
-                        )}
-                      </div>
+                      {expanded && (
+                        <div className="border-t border-gray-700/50 bg-gray-900/30 px-4 py-2.5">
+                          {toolState?.loading ? (
+                            <div className="flex items-center gap-2 py-1 text-xs text-gray-500"><Loader2 size={12} className="animate-spin" />正在获取工具列表…</div>
+                          ) : toolState?.error ? (
+                            <p className="py-1 text-xs text-gray-500">{toolState.error}</p>
+                          ) : toolState && toolState.tools.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {toolState.tools.map((t) => {
+                                const tip = [t.description, ...(t.params ?? []).map((p) => `${p.required ? "* " : ""}${p.name}${p.type ? `: ${p.type}` : ""}${p.description ? ` — ${p.description}` : ""}`)].filter(Boolean).join("\n") || t.name
+                                return (
+                                  <span key={t.name} className="inline-flex items-center gap-1 rounded-md bg-gray-800 px-2 py-0.5 text-[11px] text-gray-300" title={tip}>
+                                    <Wrench size={10} className="shrink-0 text-gray-500" />{t.name}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <p className="py-1 text-xs text-gray-500">无已注册工具</p>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  ))}
+                  )})}
                   {mcpServers.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无 MCP 服务器配置</p>}
                 </div>
               </section>

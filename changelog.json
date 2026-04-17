@@ -1,5 +1,15 @@
 [
   {
+    "version": "2.5.4",
+    "date": "2026-04-17",
+    "changes": [
+      "新增: MCP 管理页面展示已注册工具列表(Tag 样式), 悬浮显示工具描述与参数",
+      "新增: 通过 MCP 协议直接获取工具信息(支持 Command/URL 两种类型)",
+      "新增: MCP 服务器状态实时显示(ready/disabled/error/not loaded)",
+      "优化: 首次加载即异步预读所有 MCP 工具, 无需手动刷新"
+    ]
+  },
+  {
     "version": "2.5.3",
     "date": "2026-04-16",
     "changes": [

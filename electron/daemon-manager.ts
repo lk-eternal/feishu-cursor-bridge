@@ -2301,7 +2301,7 @@ function spawnAsync(args: string[], cwd: string, env: Record<string, string>): P
     child.stderr?.on("data", (d: Buffer) => { stderr += d.toString() })
     child.on("error", () => done(1))
     child.on("exit", (code) => done(code ?? 1))
-    const timer = setTimeout(() => { didTimeout = true; try { child.kill() } catch { /* */ }; done(1) }, 10_000)
+    const timer = setTimeout(() => { didTimeout = true; try { child.kill() } catch { /* */ }; done(1) }, 30_000)
   })
 }
 
@@ -2312,54 +2312,58 @@ function isEnabledStatus(status: string): boolean {
   return s !== "disabled" && !s.includes("not loaded")
 }
 
+interface McpListCache { enabled: Record<string, boolean>; status: Record<string, string>; ts: number; ws: string }
 const MCP_ENABLED_CACHE_TTL_MS = 30_000
-let mcpEnabledCache: { data: Record<string, boolean>; ts: number; ws: string } | null = null
-let getMcpEnabledMapInFlight: Promise<Record<string, boolean>> | null = null
+let mcpListCache: McpListCache | null = null
+let mcpListInflight: Promise<McpListCache> | null = null
 
-export async function getMcpEnabledMap(force = false): Promise<Record<string, boolean>> {
+async function fetchMcpList(force = false): Promise<McpListCache> {
   const config = getConfig()
   const ws = (config.workspaceDir || "").trim()
-  if (!ws || !resolveAgentBinary()) {
-    return {}
-  }
-  if (
-    !force &&
-    mcpEnabledCache &&
-    mcpEnabledCache.ws === ws &&
-    Date.now() - mcpEnabledCache.ts < MCP_ENABLED_CACHE_TTL_MS
-  ) {
-    return mcpEnabledCache.data
-  }
-  if (getMcpEnabledMapInFlight) {
-    return getMcpEnabledMapInFlight
-  }
-  const p = (async (): Promise<Record<string, boolean>> => {
+  const empty: McpListCache = { enabled: {}, status: {}, ts: 0, ws }
+  if (!ws || !resolveAgentBinary()) return empty
+  if (!force && mcpListCache && mcpListCache.ws === ws && Date.now() - mcpListCache.ts < MCP_ENABLED_CACHE_TTL_MS) return mcpListCache
+  if (mcpListInflight) return mcpListInflight
+
+  const p = (async (): Promise<McpListCache> => {
     const env: Record<string, string> = { ...process.env as Record<string, string> }
     applyProxyEnv(env, config)
     try {
-      const r = await spawnAsync(["mcp", "list"], config.workspaceDir, env)
+      const r = await spawnAsync(["mcp", "list"], ws, env)
       const clean = r.stdout.replace(ANSI_RE, "").replace(/\r/g, "")
-      const result: Record<string, boolean> = {}
+      const enabled: Record<string, boolean> = {}
+      const status: Record<string, string> = {}
       for (const line of clean.split("\n")) {
         const m = line.match(/^(.+?):\s+(.+)$/)
         if (m) {
-          result[m[1].trim()] = isEnabledStatus(m[2].trim())
+          const name = m[1].trim(), raw = m[2].trim()
+          enabled[name] = isEnabledStatus(raw)
+          status[name] = raw.toLowerCase()
         }
       }
-      mcpEnabledCache = { data: result, ts: Date.now(), ws }
+      const result: McpListCache = { enabled, status, ts: Date.now(), ws }
+      mcpListCache = result
       return result
     } catch {
-      return {}
+      return empty
     } finally {
-      getMcpEnabledMapInFlight = null
+      mcpListInflight = null
     }
   })()
-  getMcpEnabledMapInFlight = p
+  mcpListInflight = p
   return p
 }
 
+export async function getMcpEnabledMap(force = false): Promise<Record<string, boolean>> {
+  return (await fetchMcpList(force)).enabled
+}
+
+export async function getMcpStatusMap(force = false): Promise<Record<string, string>> {
+  return (await fetchMcpList(force)).status
+}
+
 export function invalidateMcpEnabledCache(): void {
-  mcpEnabledCache = null
+  mcpListCache = null
 }
 
 export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
@@ -2744,4 +2748,161 @@ export function cleanupDaemonManager(): void {
   }
   cachedPort = null
   activeDaemonWorkspaceDir = null
+}
+
+// ── MCP Server 工具列表查询（via Cursor CLI） ──────────────
+
+export interface McpToolInfo {
+  name: string
+  description?: string
+  params?: { name: string; type?: string; description?: string; required?: boolean }[]
+}
+
+function extractParams(schema: any): McpToolInfo["params"] {
+  if (!schema?.properties) return undefined
+  const required = new Set<string>(schema.required ?? [])
+  return Object.entries(schema.properties).map(([k, v]: [string, any]) => ({
+    name: k,
+    type: v.type,
+    description: v.description,
+    required: required.has(k),
+  }))
+}
+
+function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record<string, string>): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
+  return new Promise((resolve) => {
+    const env: Record<string, string> = { ...process.env as Record<string, string>, ...(envOverride ?? {}) }
+    if (!env.PATH && env.Path) env.PATH = env.Path
+
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: true })
+    } catch (e: any) {
+      resolve({ ok: false, tools: [], error: `启动失败: ${e.message}` })
+      return
+    }
+
+    let stdout = ""
+    let phase: "init" | "list" | "done" = "init"
+    const timeout = setTimeout(() => {
+      try { child.kill() } catch { /* */ }
+      resolve({ ok: false, tools: [], error: "查询超时" })
+    }, 15_000)
+
+    const finish = (result: { ok: boolean; tools: McpToolInfo[]; error?: string }) => {
+      if (phase === "done") return
+      phase = "done"
+      clearTimeout(timeout)
+      try { child.kill() } catch { /* */ }
+      resolve(result)
+    }
+
+    child.stdout?.on("data", (data: Buffer) => {
+      stdout += data.toString()
+      for (const raw of stdout.split("\n")) {
+        const line = raw.trim()
+        if (!line) continue
+        try {
+          const msg = JSON.parse(line)
+          if (msg.id === 1 && msg.result && phase === "init") {
+            phase = "list"
+            child.stdin?.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n")
+          }
+          if (msg.id === 2 && msg.result?.tools) {
+            const tools: McpToolInfo[] = (msg.result.tools as any[]).map((t: any) => ({ name: t.name, description: t.description, params: extractParams(t.inputSchema) }))
+            finish({ ok: true, tools })
+          }
+        } catch { /* not json */ }
+      }
+    })
+
+    child.on("error", (err) => finish({ ok: false, tools: [], error: `启动失败: ${err.message}` }))
+    child.on("close", () => finish(phase === "init" ? { ok: false, tools: [], error: "进程退出，未获取到工具" } : { ok: true, tools: [] }))
+
+    child.stdin?.write(JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "feishu-bridge", version: "1.0.0" } },
+    }) + "\n")
+  })
+}
+
+async function queryToolsViaHttp(url: string, headers?: Record<string, string>): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
+  const rpc = (id: number, method: string, params: object = {}) => JSON.stringify({ jsonrpc: "2.0", id, method, params })
+  const post = (body: string): Promise<any> => new Promise((resolve, reject) => {
+    const u = new URL(url)
+    const isHttps = u.protocol === "https:"
+    const mod = isHttps ? require("node:https") : require("node:http")
+    const req = mod.request(u, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...(headers ?? {}) },
+      timeout: 10_000,
+    }, (res: any) => {
+      let data = ""
+      res.on("data", (chunk: Buffer) => { data += chunk.toString() })
+      res.on("end", () => {
+        try {
+          if (res.headers["content-type"]?.includes("text/event-stream")) {
+            for (const line of data.split("\n")) {
+              if (line.startsWith("data:")) {
+                const parsed = JSON.parse(line.slice(5).trim())
+                if (parsed.id !== undefined) { resolve(parsed); return }
+              }
+            }
+          }
+          resolve(JSON.parse(data))
+        } catch { resolve(null) }
+      })
+    })
+    req.on("error", reject)
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")) })
+    req.write(body)
+    req.end()
+  })
+
+  try {
+    const initRes = await post(rpc(1, "initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "feishu-bridge", version: "1.0.0" } }))
+    if (!initRes?.result) return { ok: false, tools: [], error: "initialize 失败" }
+    const listRes = await post(rpc(2, "tools/list"))
+    if (!listRes?.result?.tools) return { ok: false, tools: [], error: "tools/list 无结果" }
+    const tools: McpToolInfo[] = (listRes.result.tools as any[]).map((t: any) => ({ name: t.name, description: t.description, params: extractParams(t.inputSchema) }))
+    return { ok: true, tools }
+  } catch (e: any) {
+    return { ok: false, tools: [], error: e?.message ?? "HTTP 请求失败" }
+  }
+}
+
+function queryToolsViaCli(serverName: string): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
+  const config = getConfig()
+  if (!config.workspaceDir || !resolveAgentBinary()) return Promise.resolve({ ok: false, tools: [], error: "CLI 不可用" })
+  const env: Record<string, string> = { ...process.env as Record<string, string> }
+  applyProxyEnv(env, config)
+  return spawnAsync(["mcp", "list-tools", serverName], config.workspaceDir, env).then((r) => {
+    const clean = (r.stdout + r.stderr).replace(ANSI_RE, "").replace(/\r/g, "")
+    if (r.code !== 0) return { ok: false, tools: [] as McpToolInfo[], error: clean.trim().split("\n").pop()?.trim() || `exit ${r.code}` }
+    const tools: McpToolInfo[] = []
+    for (const line of clean.split("\n")) {
+      const m = line.match(/^[-–]\s+(\S+)/)
+      if (m) tools.push({ name: m[1] })
+    }
+    return { ok: true, tools }
+  })
+}
+
+export async function getMcpServerTools(serverName: string): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
+  const servers = getMcpServerList()
+  const server = servers.find((s) => s.name === serverName)
+  if (!server) return { ok: false, tools: [], error: "MCP 服务器未找到" }
+
+  if (server.type === "url" && server.url) {
+    const headers = server.rawConfig?.headers as Record<string, string> | undefined
+    const result = await queryToolsViaHttp(server.url, headers)
+    if (result.ok && result.tools.length > 0) return result
+  }
+
+  if (server.type === "command" && server.command) {
+    const result = await queryToolsViaProtocol(server.command, server.args ?? [], server.env)
+    if (result.ok && result.tools.length > 0) return result
+  }
+
+  return queryToolsViaCli(serverName)
 }

@@ -22,12 +22,14 @@ import {
   toggleMcpServer,
   getMcpEnabledMap,
   clearMessageQueue,
-  execAgentSync,
+  execAgentAsync,
   applyProxyEnv,
   parseListModelsStdout,
   initDaemonManager,
   cleanupDaemonManager,
   saveAppConfigFromRenderer,
+  getMcpServerTools,
+  getMcpStatusMap,
 } from "./daemon-manager"
 import { injectWorkspace } from "./workspace-injector"
 import { initTray, destroyTray } from "./tray"
@@ -189,6 +191,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("mcp:login", (_, name: string) => loginMcpServer(name))
   ipcMain.handle("mcp:toggle", (_, name: string, enabled: boolean) => toggleMcpServer(name, enabled))
   ipcMain.handle("mcp:enabled-map", (_, force?: boolean) => getMcpEnabledMap(force ?? false))
+  ipcMain.handle("mcp:status-map", (_, force?: boolean) => getMcpStatusMap(force ?? false))
+  ipcMain.handle("mcp:tools", (_, name: string) => getMcpServerTools(name))
 
   ipcMain.handle("rules:list", () => {
     const config = getConfig()
@@ -247,12 +251,12 @@ function registerIpcHandlers(): void {
     return { ok: true }
   })
 
-  ipcMain.handle("models:list", () => {
+  ipcMain.handle("models:list", async () => {
     const config = getConfig()
     const env: Record<string, string> = { ...process.env as Record<string, string>, NODE_USE_ENV_PROXY: "1" }
     applyProxyEnv(env, config)
     const ws = config.workspaceDir?.trim() || undefined
-    const run = execAgentSync(["--list-models"], env, { timeoutMs: 30_000, logLabel: "list-models", cwd: ws })
+    const run = await execAgentAsync(["--list-models"], env, { timeoutMs: 30_000, logLabel: "list-models", cwd: ws })
     if (!run.ok) {
       return { ok: false, models: [], error: run.error || run.stderr.trim() || "获取模型列表失败" }
     }
