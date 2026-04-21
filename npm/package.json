@@ -1,6 +1,6 @@
 {
   "name": "lark-bridge-mcp",
-  "version": "2.5.4",
+  "version": "2.5.5",
   "description": "飞书 × Cursor MCP Server – 通过飞书与 AI Agent 实时沟通",
   "keywords": ["mcp", "lark", "feishu", "cursor", "bridge"],
   "license": "MIT",

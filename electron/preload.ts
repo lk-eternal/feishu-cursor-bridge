@@ -104,6 +104,12 @@ export interface AppModalRequestPayload {
   variant?: "info" | "error" | "warning"
 }
 
+export interface SkillTreeNode {
+  name: string
+  type: "file" | "directory"
+  children?: SkillTreeNode[]
+}
+
 export interface McpServerEntry {
   name: string
   type: "command" | "url"
@@ -185,8 +191,14 @@ const api = {
   saveRule: (name: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:save", name, content),
   deleteRule: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("rules:delete", name),
   getSkills: (): Promise<{ name: string; content: string }[]> => ipcRenderer.invoke("skills:list"),
+  getSkillTree: (): Promise<SkillTreeNode[]> => ipcRenderer.invoke("skills:tree"),
+  readSkillFile: (skillName: string, relativePath: string): Promise<{ ok: boolean; content?: string; error?: string }> => ipcRenderer.invoke("skills:read-file", skillName, relativePath),
+  saveSkillFile: (skillName: string, relativePath: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:save-file", skillName, relativePath, content),
+  deleteSkillFile: (skillName: string, relativePath: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("skills:delete-file", skillName, relativePath),
+  createSkillDir: (skillName: string, relativePath: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:create-dir", skillName, relativePath),
   saveSkill: (name: string, content: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:save", name, content),
-  deleteSkill: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:delete", name),
+    renameSkill: (oldName: string, newName: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:rename", oldName, newName),
+    deleteSkill: (name: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("skills:delete", name),
   onMcpLoginComplete: (cb: (data: { serverName: string; ok: boolean }) => void) => {
     const handler = (_: unknown, data: { serverName: string; ok: boolean }) => cb(data)
     ipcRenderer.on("mcp:login-complete", handler)

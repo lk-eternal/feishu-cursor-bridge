@@ -35,6 +35,12 @@ interface CliLoginStatus {
   error?: string
 }
 
+interface SkillTreeNode {
+  name: string
+  type: "file" | "directory"
+  children?: SkillTreeNode[]
+}
+
 interface McpServerEntry {
   name: string
   type: "command" | "url"
@@ -145,8 +151,14 @@ interface ElectronAPI {
   saveRule(name: string, content: string): Promise<{ ok: boolean }>
   deleteRule(name: string): Promise<{ ok: boolean }>
   getSkills(): Promise<{ name: string; content: string }[]>
+  getSkillTree(): Promise<SkillTreeNode[]>
+  readSkillFile(skillName: string, relativePath: string): Promise<{ ok: boolean; content?: string; error?: string }>
+  saveSkillFile(skillName: string, relativePath: string, content: string): Promise<{ ok: boolean }>
+  deleteSkillFile(skillName: string, relativePath: string): Promise<{ ok: boolean; error?: string }>
+  createSkillDir(skillName: string, relativePath: string): Promise<{ ok: boolean }>
   saveSkill(name: string, content: string): Promise<{ ok: boolean }>
-  deleteSkill(name: string): Promise<{ ok: boolean }>
+    renameSkill(oldName: string, newName: string): Promise<{ ok: boolean }>
+    deleteSkill(name: string): Promise<{ ok: boolean }>
   onMcpLoginComplete(cb: (data: { serverName: string; ok: boolean }) => void): () => void
   onDaemonStatus(cb: (status: DaemonStatus) => void): () => void
   onDaemonLog(cb: (line: string) => void): () => void

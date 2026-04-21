@@ -238,10 +238,86 @@ function registerIpcHandlers(): void {
       })
   })
 
+  interface SkillTreeNode {
+    name: string
+    type: "file" | "directory"
+    children?: SkillTreeNode[]
+  }
+
+  function buildTree(dir: string): SkillTreeNode[] {
+    if (!fs.existsSync(dir)) return []
+    return fs.readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => {
+        if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+      .map((entry): SkillTreeNode => {
+        if (entry.isDirectory()) {
+          return { name: entry.name, type: "directory", children: buildTree(path.join(dir, entry.name)) }
+        }
+        return { name: entry.name, type: "file" }
+      })
+  }
+
+  ipcMain.handle("skills:tree", () => {
+    const skillsDir = path.join(os.homedir(), ".cursor", "skills")
+    if (!fs.existsSync(skillsDir)) return []
+    return fs.readdirSync(skillsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((d) => ({
+        name: d.name,
+        type: "directory" as const,
+        children: buildTree(path.join(skillsDir, d.name)),
+      }))
+  })
+
+  ipcMain.handle("skills:read-file", (_, skillName: string, relativePath: string) => {
+    const filePath = path.join(os.homedir(), ".cursor", "skills", skillName, relativePath)
+    if (!fs.existsSync(filePath)) return { ok: false, error: "文件不存在" }
+    return { ok: true, content: fs.readFileSync(filePath, "utf-8") }
+  })
+
+  ipcMain.handle("skills:save-file", (_, skillName: string, relativePath: string, content: string) => {
+    const filePath = path.join(os.homedir(), ".cursor", "skills", skillName, relativePath)
+    const dir = path.dirname(filePath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(filePath, content, "utf-8")
+    return { ok: true }
+  })
+
+  ipcMain.handle("skills:create-dir", (_, skillName: string, relativePath: string) => {
+    const dirPath = path.join(os.homedir(), ".cursor", "skills", skillName, relativePath)
+    if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true })
+    return { ok: true }
+  })
+
+  ipcMain.handle("skills:delete-file", (_, skillName: string, relativePath: string) => {
+    const filePath = path.join(os.homedir(), ".cursor", "skills", skillName, relativePath)
+    if (!fs.existsSync(filePath)) return { ok: false, error: "文件不存在" }
+    const stat = fs.statSync(filePath)
+    if (stat.isDirectory()) {
+      fs.rmSync(filePath, { recursive: true, force: true })
+    } else {
+      fs.unlinkSync(filePath)
+    }
+    return { ok: true }
+  })
+
   ipcMain.handle("skills:save", (_, name: string, content: string) => {
     const dir = path.join(os.homedir(), ".cursor", "skills", name)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, "SKILL.md"), content, "utf-8")
+    return { ok: true }
+  })
+
+  ipcMain.handle("skills:rename", (_, oldName: string, newName: string) => {
+    const base = path.join(os.homedir(), ".cursor", "skills")
+    const oldDir = path.join(base, oldName)
+    const newDir = path.join(base, newName)
+    if (!fs.existsSync(oldDir)) return { ok: false, error: "原目录不存在" }
+    if (fs.existsSync(newDir)) return { ok: false, error: "目标目录已存在" }
+    fs.renameSync(oldDir, newDir)
     return { ok: true }
   })
 

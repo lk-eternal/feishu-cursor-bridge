@@ -25,7 +25,12 @@ import {
   Download,
   Play,
   ChevronDown,
+  ChevronRight,
   Wrench,
+  File,
+  Folder,
+  FilePlus,
+  FolderPlus,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
@@ -109,8 +114,13 @@ export default function Settings({ onBack }: Props) {
   const [ruleEditOriginalName, setRuleEditOriginalName] = useState<string | null>(null)
 
   const [skills, setSkills] = useState<SkillFile[]>([])
+  const [skillTree, setSkillTree] = useState<SkillTreeNode[]>([])
+  const [skillExpanded, setSkillExpanded] = useState<Set<string>>(new Set())
   const [skillEditing, setSkillEditing] = useState<SkillFile | null>(null)
   const [skillEditOriginalName, setSkillEditOriginalName] = useState<string | null>(null)
+  const [skillFileEditing, setSkillFileEditing] = useState<{ skillName: string; relativePath: string; content: string } | null>(null)
+  const [skillPrompt, setSkillPrompt] = useState<{ skillName: string; parentPath: string; kind: "file" | "folder"; value: string } | null>(null)
+  const [skillDeleteConfirm, setSkillDeleteConfirm] = useState<{ skillName: string; relativePath: string } | null>(null)
 
   const [tasks, setTasks] = useState<TaskItem[]>([])
   const [taskEditing, setTaskEditing] = useState<TaskItem | null>(null)
@@ -141,7 +151,10 @@ export default function Settings({ onBack }: Props) {
     }
   }, [])
   const refreshRules = useCallback(() => { window.electronAPI.getRules().then(setRules) }, [])
-  const refreshSkills = useCallback(() => { window.electronAPI.getSkills().then(setSkills) }, [])
+  const refreshSkills = useCallback(() => {
+    window.electronAPI.getSkills().then(setSkills)
+    window.electronAPI.getSkillTree().then(setSkillTree)
+  }, [])
   const refreshTasks = useCallback(() => { window.electronAPI.getScheduledTasks().then(setTasks) }, [])
 
   useEffect(() => {
@@ -255,9 +268,6 @@ export default function Settings({ onBack }: Props) {
       const res = await window.electronAPI.applyAppUpdate()
       if (res.ok) {
         setUpdateMsg(res.message ?? "已触发更新流程。")
-        if (res.message === "正在下载…") {
-          setUpdateDownloadPct(0)
-        }
         setUpdateCheck(null)
       } else {
         setUpdateDownloadPct(null)
@@ -432,9 +442,51 @@ export default function Settings({ onBack }: Props) {
   const handleSkillDelete = async (name: string) => { await window.electronAPI.deleteSkill(name); refreshSkills() }
   const handleSkillSave = async () => {
     if (!skillEditing || !skillEditing.name.trim()) return
-    if (skillEditOriginalName && skillEditOriginalName !== skillEditing.name) await window.electronAPI.deleteSkill(skillEditOriginalName)
-    await window.electronAPI.saveSkill(skillEditing.name.trim(), skillEditing.content)
+    const newName = skillEditing.name.trim()
+    if (skillEditOriginalName && skillEditOriginalName !== newName) {
+      await window.electronAPI.renameSkill(skillEditOriginalName, newName)
+    }
+    await window.electronAPI.saveSkill(newName, skillEditing.content)
     setSkillEditing(null); refreshSkills()
+  }
+  const toggleSkillExpand = (key: string) => {
+    setSkillExpanded((prev) => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
+  const openSkillFile = async (skillName: string, relativePath: string) => {
+    const res = await window.electronAPI.readSkillFile(skillName, relativePath)
+    if (res.ok) setSkillFileEditing({ skillName, relativePath, content: res.content ?? "" })
+  }
+  const handleSkillFileSave = async () => {
+    if (!skillFileEditing) return
+    await window.electronAPI.saveSkillFile(skillFileEditing.skillName, skillFileEditing.relativePath, skillFileEditing.content)
+    setSkillFileEditing(null); refreshSkills()
+  }
+  const handleCreateFile = (skillName: string, parentPath: string) => setSkillPrompt({ skillName, parentPath, kind: "file", value: "" })
+  const handleCreateFolder = (skillName: string, parentPath: string) => setSkillPrompt({ skillName, parentPath, kind: "folder", value: "" })
+  const handleSkillPromptConfirm = async () => {
+    if (!skillPrompt || !skillPrompt.value.trim()) return
+    const name = skillPrompt.value.trim()
+    const { skillName, parentPath, kind } = skillPrompt
+    if (kind === "file") {
+      const rel = parentPath ? `${parentPath}/${name}` : name
+      await window.electronAPI.saveSkillFile(skillName, rel, "")
+      refreshSkills(); setSkillPrompt(null)
+      openSkillFile(skillName, rel)
+    } else {
+      const rel = parentPath ? `${parentPath}/${name}` : name
+      await window.electronAPI.createSkillDir(skillName, rel)
+      refreshSkills(); setSkillPrompt(null)
+    }
+  }
+  const handleDeleteFile = (skillName: string, relativePath: string) => setSkillDeleteConfirm({ skillName, relativePath })
+  const handleDeleteFileConfirm = async () => {
+    if (!skillDeleteConfirm) return
+    await window.electronAPI.deleteSkillFile(skillDeleteConfirm.skillName, skillDeleteConfirm.relativePath)
+    setSkillDeleteConfirm(null); refreshSkills()
   }
 
   // ── Tasks ──
@@ -550,7 +602,7 @@ export default function Settings({ onBack }: Props) {
                       <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
                         <div
                           className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
-                          style={{ width: `${updateDownloadPct <= 0 ? 6 : updateDownloadPct}%` }}
+                          style={{ width: `${updateDownloadPct}%` }}
                         />
                       </div>
                     )}
@@ -792,17 +844,72 @@ export default function Settings({ onBack }: Props) {
                   <button onClick={openSkillAdd} className="flex items-center gap-1 rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-blue-500"><Plus size={12} />新增</button>
                 </div>
                 <p className="text-xs text-gray-600">管理 ~/.cursor/skills/ 下的技能（每个技能为一个文件夹 + SKILL.md）</p>
-                <div className="space-y-2">
-                  {skills.map((s) => (
-                    <div key={s.name} className="flex items-center justify-between rounded-lg border border-gray-700 px-4 py-3">
-                      <div className="min-w-0"><p className="truncate text-sm font-medium">{s.name}</p><p className="truncate text-xs text-gray-500">{s.content.slice(0, 80)}{s.content.length > 80 ? "..." : ""}</p></div>
-                      <div className="ml-3 flex shrink-0 items-center gap-2">
-                        <button onClick={() => openSkillEdit(s)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white"><Pencil size={13} /></button>
-                        <button onClick={() => handleSkillDelete(s.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400"><Trash2 size={13} /></button>
+                <div className="space-y-1">
+                  {skillTree.map((skill) => {
+                    const isExpanded = skillExpanded.has(skill.name)
+                    const renderNode = (node: SkillTreeNode, parentPath: string, depth: number): React.ReactNode => {
+                      const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name
+                      const nodeKey = `${skill.name}/${fullPath}`
+                      if (node.type === "directory") {
+                        const dirExpanded = skillExpanded.has(nodeKey)
+                        return (
+                          <div key={nodeKey}>
+                            <div className="group flex items-center" style={{ paddingLeft: `${(depth + 1) * 16 + 4}px` }}>
+                              <button
+                                onClick={() => toggleSkillExpand(nodeKey)}
+                                className="flex flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-xs text-gray-400 transition hover:bg-gray-800/50 hover:text-gray-200"
+                              >
+                                {dirExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                <Folder size={12} className="text-blue-400/70" />
+                                <span>{node.name}</span>
+                              </button>
+                              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
+                                <button onClick={() => handleCreateFile(skill.name, fullPath)} className="rounded p-0.5 text-gray-600 hover:text-gray-300" title="新建文件"><FilePlus size={12} /></button>
+                                <button onClick={() => handleCreateFolder(skill.name, fullPath)} className="rounded p-0.5 text-gray-600 hover:text-gray-300" title="新建文件夹"><FolderPlus size={12} /></button>
+                                <button onClick={() => handleDeleteFile(skill.name, fullPath)} className="rounded p-0.5 text-gray-600 hover:text-red-400" title="删除文件夹"><Trash2 size={12} /></button>
+                              </div>
+                            </div>
+                            {dirExpanded && node.children?.map((child) => renderNode(child, fullPath, depth + 1))}
+                          </div>
+                        )
+                      }
+                      return (
+                        <div key={nodeKey} className="group flex items-center" style={{ paddingLeft: `${(depth + 1) * 16 + 20}px` }}>
+                          <button
+                            onClick={() => openSkillFile(skill.name, fullPath)}
+                            className="flex flex-1 items-center gap-1.5 rounded px-1 py-0.5 text-xs text-gray-500 transition hover:bg-gray-800/50 hover:text-gray-200"
+                          >
+                            <File size={11} className="shrink-0 text-gray-600" />
+                            <span className="truncate">{node.name}</span>
+                          </button>
+                          <button onClick={() => handleDeleteFile(skill.name, fullPath)} className="shrink-0 rounded p-0.5 text-gray-600 opacity-0 transition hover:text-red-400 group-hover:opacity-100" title="删除文件"><Trash2 size={12} /></button>
+                        </div>
+                      )
+                    }
+                    return (
+                      <div key={skill.name} className="rounded-lg border border-gray-700 overflow-hidden">
+                        <div className="flex items-center justify-between px-3 py-2.5">
+                          <button onClick={() => toggleSkillExpand(skill.name)} className="flex items-center gap-2 min-w-0">
+                            {isExpanded ? <ChevronDown size={14} className="shrink-0 text-gray-500" /> : <ChevronRight size={14} className="shrink-0 text-gray-500" />}
+                            <Sparkles size={14} className="shrink-0 text-amber-400/70" />
+                            <span className="truncate text-sm font-medium">{skill.name}</span>
+                          </button>
+                          <div className="ml-3 flex shrink-0 items-center gap-1">
+                            <button onClick={() => handleCreateFile(skill.name, "")} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white" title="新建文件"><FilePlus size={13} /></button>
+                            <button onClick={() => handleCreateFolder(skill.name, "")} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white" title="新建文件夹"><FolderPlus size={13} /></button>
+                            <button onClick={() => { const s = skills.find((x) => x.name === skill.name); if (s) openSkillEdit(s) }} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-white" title="编辑 SKILL.md"><Pencil size={13} /></button>
+                            <button onClick={() => handleSkillDelete(skill.name)} className="rounded p-1 text-gray-500 transition hover:bg-gray-800 hover:text-red-400" title="删除整个 Skill"><Trash2 size={13} /></button>
+                          </div>
+                        </div>
+                        {isExpanded && skill.children && skill.children.length > 0 && (
+                          <div className="border-t border-gray-700/50 bg-gray-900/30 px-1 py-1.5">
+                            {skill.children.map((child) => renderNode(child, "", 0))}
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
-                  {skills.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无 Skill</p>}
+                    )
+                  })}
+                  {skillTree.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无 Skill</p>}
                 </div>
               </section>
             </>)}
@@ -882,6 +989,75 @@ export default function Settings({ onBack }: Props) {
             <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
               <button onClick={() => setSkillEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
               <button onClick={handleSkillSave} disabled={!skillEditing.name.trim()} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Skill File Edit Modal ═══ */}
+      {skillFileEditing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="flex w-full max-w-2xl flex-col rounded-xl border border-gray-700 bg-gray-900 shadow-2xl" style={{ maxHeight: "85vh" }}>
+            <div className="flex items-center justify-between border-b border-gray-800 px-6 py-4">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-gray-200">编辑文件</h3>
+                <p className="truncate text-xs text-gray-500 mt-0.5">{skillFileEditing.skillName}/{skillFileEditing.relativePath}</p>
+              </div>
+              <button onClick={() => setSkillFileEditing(null)} className="text-gray-500 hover:text-white"><X size={16} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4">
+              <textarea
+                value={skillFileEditing.content}
+                onChange={(e) => setSkillFileEditing({ ...skillFileEditing, content: e.target.value })}
+                rows={24}
+                spellCheck={false}
+                className={inputCls + " font-mono text-xs leading-relaxed"}
+              />
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-6 py-4">
+              <button onClick={() => setSkillFileEditing(null)} className="rounded-md px-4 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white">取消</button>
+              <button onClick={handleSkillFileSave} className="rounded-md bg-blue-600 px-4 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500">保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Skill Create Prompt ═══ */}
+      {skillPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-xs rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+            <div className="border-b border-gray-800 px-5 py-3">
+              <h3 className="text-sm font-semibold text-gray-200">新建{skillPrompt.kind === "file" ? "文件" : "文件夹"}</h3>
+            </div>
+            <div className="px-5 py-4">
+              <input
+                autoFocus
+                type="text"
+                value={skillPrompt.value}
+                onChange={(e) => setSkillPrompt({ ...skillPrompt, value: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") void handleSkillPromptConfirm() }}
+                placeholder={skillPrompt.kind === "file" ? "例如 utils.py" : "例如 scripts"}
+                className={inputCls}
+              />
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-5 py-3">
+              <button onClick={() => setSkillPrompt(null)} className="rounded-md px-3 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-white">取消</button>
+              <button onClick={() => void handleSkillPromptConfirm()} disabled={!skillPrompt.value.trim()} className="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-40">确定</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══ Skill Delete Confirm ═══ */}
+      {skillDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-xs rounded-xl border border-gray-700 bg-gray-900 shadow-2xl">
+            <div className="px-5 py-4">
+              <p className="text-sm text-gray-300">确定删除 <code className="text-red-300">{skillDeleteConfirm.relativePath}</code> ？</p>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-800 px-5 py-3">
+              <button onClick={() => setSkillDeleteConfirm(null)} className="rounded-md px-3 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-white">取消</button>
+              <button onClick={() => void handleDeleteFileConfirm()} className="rounded-md bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500">删除</button>
             </div>
           </div>
         </div>
