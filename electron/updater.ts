@@ -6,6 +6,7 @@ import * as https from "node:https"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
 import * as fs from "node:fs"
+import * as path from "node:path"
 import semver from "semver"
 
 const execFileAsync = promisify(execFile)
@@ -347,6 +348,16 @@ async function showWinDownloadFallback(reason: unknown): Promise<void> {
   }
 }
 
+function clearUpdaterCache(): void {
+  try {
+    const cacheDir = path.join(app.getPath("userData"), "..", `${app.getName()}-updater`)
+    const pending = path.join(cacheDir, "pending")
+    if (fs.existsSync(pending)) {
+      fs.rmSync(pending, { recursive: true, force: true })
+    }
+  } catch { /* best-effort */ }
+}
+
 function wireAutoUpdater(): void {
   if (autoUpdaterWired || !app.isPackaged) {
     return
@@ -504,6 +515,7 @@ async function runStartupUpdateCheck(): Promise<void> {
       return
     }
     winDownloadRequested = true
+    clearUpdaterCache()
     try {
       await autoUpdater.checkForUpdates()
     } catch (e) {
@@ -626,6 +638,7 @@ export function registerUpdaterIpc(): void {
 
     if (process.platform === "win32") {
       winDownloadRequested = true
+      clearUpdaterCache()
       try {
         await autoUpdater.checkForUpdates()
         return { ok: true, message: "正在下载…" }
