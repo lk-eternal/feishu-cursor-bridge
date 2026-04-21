@@ -43,7 +43,7 @@ export default function Setup({ onComplete }: Props) {
   const [model, setModel] = useState("auto")
   const [httpProxy, setHttpProxy] = useState("")
   const [httpsProxy, setHttpsProxy] = useState("")
-  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1")
+  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [cliReady, setCliReady] = useState<boolean | null>(null)
@@ -288,7 +288,7 @@ export default function Setup({ onComplete }: Props) {
                     type="text"
                     value={httpProxy}
                     onChange={(e) => setHttpProxy(e.target.value)}
-                    placeholder="http://127.0.0.1:7897"
+                    placeholder="http://127.0.0.1:1080"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
                   />
                 </div>
@@ -298,7 +298,7 @@ export default function Setup({ onComplete }: Props) {
                     type="text"
                     value={httpsProxy}
                     onChange={(e) => setHttpsProxy(e.target.value)}
-                    placeholder="http://127.0.0.1:7897"
+                    placeholder="http://127.0.0.1:1080"
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
                   />
                 </div>
@@ -309,7 +309,7 @@ export default function Setup({ onComplete }: Props) {
                   type="text"
                   value={noProxy}
                   onChange={(e) => setNoProxy(e.target.value)}
-                  placeholder="localhost,127.0.0.1"
+                  placeholder="localhost,127.0.0.1,feishu.cn"
                   className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
                 />
               </div>

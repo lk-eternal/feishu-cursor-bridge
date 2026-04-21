@@ -75,7 +75,7 @@ export default function Settings({ onBack }: Props) {
   const [model, setModel] = useState("auto")
   const [showSecret, setShowSecret] = useState(false)
   const [proxy, setProxy] = useState("")
-  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1")
+  const [noProxy, setNoProxy] = useState("localhost,127.0.0.1,feishu.cn")
   const [agentNewSession, setAgentNewSession] = useState(false)
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
@@ -192,7 +192,7 @@ export default function Settings({ onBack }: Props) {
       setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
       setWorkspaceDir(config.workspaceDir); setModel(config.model)
       setProxy(config.httpProxy || config.httpsProxy || "")
-      setNoProxy(config.noProxy || "localhost,127.0.0.1")
+      setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
       setCloseWindowAction(config.closeWindowAction ?? "ask")
       loaded.current = true
@@ -205,6 +205,21 @@ export default function Settings({ onBack }: Props) {
     const unsub2 = window.electronAPI.onScheduledTaskStatus(setTaskStatuses)
     return () => { unsub1(); unsub2() }
   }, [refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
+
+  useEffect(() => {
+    if (tab === "general") window.electronAPI.getConfig().then((config) => {
+      setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
+      setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
+      setWorkspaceDir(config.workspaceDir); setModel(config.model)
+      setProxy(config.httpProxy || config.httpsProxy || "")
+      setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
+      setAgentNewSession(config.agentNewSession ?? false)
+      setCloseWindowAction(config.closeWindowAction ?? "ask")
+    })
+    if (tab === "rules") refreshRules()
+    if (tab === "skills") refreshSkills()
+    if (tab === "tasks") { refreshTasks(); window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses) }
+  }, [tab, refreshRules, refreshSkills, refreshTasks])
 
   const autoSave = useCallback(() => {
     if (!loaded.current) return
@@ -646,12 +661,11 @@ export default function Settings({ onBack }: Props) {
                 <h3 className="text-sm font-medium text-gray-300">代理设置</h3>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">HTTP / HTTPS 代理</label>
-                  <input type="text" value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://127.0.0.1:7897" className={inputCls} />
-                  <p className="mt-1 text-xs text-gray-600">同时设置 HTTP_PROXY 和 HTTPS_PROXY</p>
+                  <input type="text" value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://127.0.0.1:1080" className={inputCls} />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-gray-500">NO_PROXY</label>
-                  <input type="text" value={noProxy} onChange={(e) => setNoProxy(e.target.value)} placeholder="localhost,127.0.0.1" className={inputCls} />
+                  <input type="text" value={noProxy} onChange={(e) => setNoProxy(e.target.value)} placeholder="localhost,127.0.0.1,feishu.cn" className={inputCls} />
                 </div>
               </section>
             </>)}

@@ -11,6 +11,12 @@ import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns,
 
 const execAsync = promisify(exec)
 
+function quoteArg(a: string): string {
+  if (process.platform !== "win32") return a
+  if (/[\s"&|<>^()!%]/.test(a) || /[^\x20-\x7E]/.test(a)) return `"${a.replace(/"/g, '\\"')}"`
+  return a
+}
+
 const LOG_BUFFER_MAX = 300
 const logBuffer: string[] = []
 
@@ -758,7 +764,7 @@ export async function loginCli(): Promise<{ ok: boolean; output: string }> {
           env: spawnEnv,
         })
       } else {
-        child = spawn("agent", args, {
+        child = spawn("agent", args.map(quoteArg), {
           shell: process.platform === "win32",
           windowsHide: false,
           stdio: ["ignore", "pipe", "pipe"],
@@ -778,12 +784,22 @@ export async function loginCli(): Promise<{ ok: boolean; output: string }> {
         if (s) broadcastLog(`[CLI Login:err] ${s}`, "ERROR")
       })
 
-      child.on("exit", (code) => {
+      child.on("exit", async (code) => {
         if (settled) return
         settled = true
-        resolve(code === 0
-          ? { ok: true, output: "Cursor CLI 登录授权成功！" }
-          : { ok: false, output: output || `登录失败 (exit code: ${code})` })
+        if (code !== 0) {
+          resolve({ ok: false, output: output || `登录失败 (exit code: ${code})` })
+          return
+        }
+        for (let i = 0; i < 5; i++) {
+          await new Promise((r) => setTimeout(r, 1000))
+          const st = await checkAgentLoggedIn()
+          if (st.loggedIn) {
+            resolve({ ok: true, output: "Cursor CLI 登录授权成功！" })
+            return
+          }
+        }
+        resolve({ ok: true, output: "登录流程已完成，但 whoami 未确认登录态，请刷新重试" })
       })
 
       child.on("error", (e) => {
@@ -984,7 +1000,7 @@ export function launchIndependentAgent(taskId: string, taskName: string, message
     if (agentNodePath && agentIndexPath) {
       child = spawn(agentNodePath, [agentIndexPath, ...args], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv })
     } else {
-      child = spawn("agent", args, { shell: process.platform === "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv })
+      child = spawn("agent", args.map(quoteArg), { shell: process.platform === "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv })
     }
 
     const agentOutBuf = { current: "" }
@@ -1095,7 +1111,7 @@ export function execAgentSync(
     }
     return { ok: true, stdout, stderr }
   }
-  const r = spawnSync("agent", agentArgs, {
+  const r = spawnSync("agent", agentArgs.map(quoteArg), {
     encoding: "utf-8",
     timeout: timeoutMs,
     env: mergedEnv,
@@ -1158,7 +1174,7 @@ export async function execAgentAsync(
         cwd,
       })
     } else {
-      child = spawn("agent", agentArgs, {
+      child = spawn("agent", agentArgs.map(quoteArg), {
         env: mergedEnv,
         shell: process.platform === "win32",
         windowsHide: true,
@@ -1287,7 +1303,7 @@ function startAgentChildProcess(
         env: spawnEnv,
       })
     } else {
-      child = spawn("agent", args, {
+      child = spawn("agent", args.map(quoteArg), {
         shell: process.platform === "win32",
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -2173,6 +2189,35 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/workspace": {
+          const wsArgs = cmdTokens.slice(1)
+          if (wsArgs.length === 0 || wsArgs[0] === "info") {
+            const cfg = getConfig()
+            await reportCommandResult(lock.port, claimed.messageId, true,
+              `📂 当前工作目录: ${cfg.workspaceDir || "(未配置)"}`)
+          } else if (wsArgs[0] === "set" && wsArgs.length >= 2) {
+            const newDir = wsArgs.slice(1).join(" ").trim()
+            const cfg = getConfig()
+            if (newDir === cfg.workspaceDir) {
+              await reportCommandResult(lock.port, claimed.messageId, true, `📂 工作目录未变化: ${newDir}`)
+            } else {
+              await reportCommandResult(lock.port, claimed.messageId, true,
+                `📂 正在切换工作目录到: ${newDir}\n⏳ 需要重启 Daemon 生效...`)
+              stopAgent()
+              const result = await applyWorkspaceDirRestart(newDir)
+              if (result.ok) {
+                broadcastLog(`[指令 /workspace] 已切换到 ${newDir} 并重启 Daemon`, "INFO")
+              } else {
+                broadcastLog(`[指令 /workspace] 切换失败: ${result.error}`, "ERROR")
+              }
+            }
+          } else {
+            await reportCommandResult(lock.port, claimed.messageId, false,
+              "用法：/workspace 查看当前 | /workspace set <路径>")
+          }
+          break
+        }
+
         case "/help": {
           const helpLines = [
             "💡 可用指令：",
@@ -2185,6 +2230,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /task 定时任务",
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
+            "🔹 /workspace 切换工作目录",
             "🔹 /help 指令列表",
           ]
           await reportCommandResult(lock.port, claimed.messageId, true, helpLines.join("\n"))
@@ -2294,7 +2340,7 @@ function spawnAsync(args: string[], cwd: string, env: Record<string, string>): P
       ? spawn(agentNodePath, [agentIndexPath, ...args], {
           windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd, env,
         })
-      : spawn("agent", args, {
+      : spawn("agent", args.map(quoteArg), {
           shell: true, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], cwd, env,
         })
     child.stdout?.on("data", (d: Buffer) => { stdout += d.toString() })
@@ -2540,7 +2586,7 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
           env: spawnEnv,
         })
       } else {
-        mcpLoginChild = spawn("agent", args, {
+        mcpLoginChild = spawn("agent", args.map(quoteArg), {
           shell: true,
           windowsHide: false,
           stdio: ["ignore", "pipe", "pipe"],
@@ -2776,7 +2822,7 @@ function queryToolsViaProtocol(cmd: string, args: string[], envOverride?: Record
 
     let child: ReturnType<typeof spawn>
     try {
-      child = spawn(cmd, args, { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: true })
+      child = spawn(quoteArg(cmd), args.map(quoteArg), { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: true })
     } catch (e: any) {
       resolve({ ok: false, tools: [], error: `启动失败: ${e.message}` })
       return

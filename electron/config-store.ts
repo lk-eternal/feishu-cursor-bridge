@@ -46,7 +46,7 @@ const defaults: AppConfig = {
   setupComplete: false,
   httpProxy: "",
   httpsProxy: "",
-  noProxy: "localhost,127.0.0.1",
+  noProxy: "localhost,127.0.0.1,feishu.cn",
   agentNewSession: false,
   agentSkipContinueNextLaunch: false,
   closeWindowAction: "ask",

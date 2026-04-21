@@ -206,4 +206,29 @@ export function registerAdminTools(mcpServer: McpServer): void {
       }
     },
   );
+
+  // ── manage_workspace ──
+
+  mcpServer.tool(
+    "manage_workspace",
+    "管理工作目录。查询当前工作目录或切换到新目录（切换后会自动重启 Daemon）。",
+    {
+      action: z.enum(["get", "set"]).describe("操作：get=查看当前工作目录, set=切换工作目录"),
+      dir: z.string().optional().describe("新的工作目录路径（set 时必填）"),
+    },
+    async ({ action, dir }) => {
+      try {
+        if (action === "get") {
+          const data = await daemonGet("/api/workspace");
+          return txt(`📂 当前工作目录: ${data.workspaceDir || "(未配置)"}`);
+        }
+        if (!dir?.trim()) return txt("❌ 请提供目录路径（dir 参数）");
+        const res = await daemonPost("/api/workspace", { dir: dir.trim() });
+        if (res.ok) return txt(`✅ ${res.message}\n📂 ${res.dir}`);
+        return txt(`❌ ${res.error ?? "操作失败"}`);
+      } catch (e: any) {
+        return txt(`❌ Daemon 通信失败: ${e?.message ?? e}`);
+      }
+    },
+  );
 }

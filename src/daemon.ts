@@ -153,6 +153,7 @@ const COMMANDS: Record<string, string> = {
   "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
+  "/workspace": "切换工作目录（/workspace 查看当前 | /workspace set <路径>）",
   "/clean": "清空消息队列",
   "/reset": "下次拉起 Agent 时不使用 --continue（新 CLI 会话），不删除本地文件",
   "/restart": "停止 Agent + 清空队列 + 重启 Daemon",
@@ -666,6 +667,23 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
         return true;
       }
       json(res, { ok: false, error: "unknown action" }, 400);
+      return true;
+    }
+  }
+
+  // ── Workspace 管理 ──
+  if (pathname === "/api/workspace") {
+    if (method === "GET") {
+      json(res, { ok: true, workspaceDir: WORKSPACE_DIR });
+      return true;
+    }
+    if (method === "POST") {
+      const body = JSON.parse(await readBody(req));
+      const { dir } = body as { dir?: string };
+      if (!dir?.trim()) { json(res, { ok: false, error: "dir is required" }, 400); return true; }
+      const msgId = `api-ws-${Date.now()}`;
+      pushCommandToQueue(`/workspace set ${dir.trim()}`, msgId, "mcp-api");
+      json(res, { ok: true, message: "workspace change accepted, restarting...", dir: dir.trim() });
       return true;
     }
   }
