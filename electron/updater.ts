@@ -351,9 +351,9 @@ async function showWinDownloadFallback(reason: unknown): Promise<void> {
 function clearUpdaterCache(): void {
   try {
     const cacheDir = path.join(app.getPath("userData"), "..", `${app.getName()}-updater`)
-    const pending = path.join(cacheDir, "pending")
-    if (fs.existsSync(pending)) {
-      fs.rmSync(pending, { recursive: true, force: true })
+    if (!fs.existsSync(cacheDir)) return
+    for (const entry of fs.readdirSync(cacheDir)) {
+      fs.rmSync(path.join(cacheDir, entry), { recursive: true, force: true })
     }
   } catch { /* best-effort */ }
 }
