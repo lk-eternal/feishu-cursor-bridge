@@ -4,8 +4,8 @@ import { z } from "zod";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { stripProxyEnv, createLarkClient, LarkSender } from "./shared/lark-core.js";
-import { initFileQueue, getQueueDir, pushToFileQueue, pollFileQueueBatch, cleanupStaleMessages } from "./file-queue.js";
+import { stripProxyEnv, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
+import { initFileQueue, getQueueDir, pushToFileQueue, pollFileQueue, QueueMessage, cleanupStaleMessages } from "./file-queue.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -107,10 +107,12 @@ function pushMessage(content: string, messageId?: string): void {
 }
 
 function startLarkConnection(): void {
-  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (text, messageId, messageType, rawContent, senderOpenId) => {
-    if (senderOpenId && !sender.resolvedTarget) {
+  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
+    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId } = ev;
+
+    if (chatType === "p2p" && senderOpenId && !sender.resolvedTarget) {
       sender.autoOpenId = senderOpenId;
-      log("INFO", `自动识别用户 open_id: ${senderOpenId}（可保存到 LARK_RECEIVE_ID 配置中）`);
+      log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
     }
 
     if (messageType === "text" && isCommand(text)) {
@@ -138,15 +140,25 @@ mcpServer.tool(
   {
     message: z.string().optional().describe("要发送给用户的消息内容。不传则不发送"),
     timeout_seconds: z.number().optional().describe("等待用户回复的超时秒数。不传则不等待，立即返回"),
+    message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
   },
-  async ({ message, timeout_seconds }) => {
+  async ({ message, timeout_seconds, message_id, chat_id }) => {
     try {
-      if (message) await sender.sendMessage(message);
+      if (message) {
+        if (message_id) await sender.sendMessage(message, message_id);
+        else if (chat_id) await sender.sendMessageToChat(chat_id, message);
+        else await sender.sendMessage(message);
+      }
       const timeoutMs = (timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0;
       if (timeoutMs > 0) {
-        const reply = await pollFileQueueBatch(timeoutMs);
+        const reply = await pollFileQueue(timeoutMs, undefined, chat_id);
         if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
-        return { content: [{ type: "text" as const, text: reply }] };
+        const meta = [reply.text];
+        if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
+        if (reply.chatId) meta.push(`[chat_id=${reply.chatId}]`);
+        if (reply.chatType) meta.push(`[chat_type=${reply.chatType}]`);
+        return { content: [{ type: "text" as const, text: meta.join("\n") }] };
       }
       return { content: [{ type: "text" as const, text: message ? "消息已发送" : "ok" }] };
     } catch (e: any) {
@@ -159,15 +171,21 @@ mcpServer.tool(
 mcpServer.tool(
   "send_image",
   "发送本地图片到飞书。image_path 为本地文件绝对路径。",
-  { image_path: z.string().describe("图片绝对路径") },
-  async ({ image_path }) => { await sender.sendImage(image_path); return { content: [{ type: "text" as const, text: "图片已发送" }] }; },
+  {
+    image_path: z.string().describe("图片绝对路径"),
+    message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+  },
+  async ({ image_path, message_id }) => { await sender.sendImage(image_path, message_id); return { content: [{ type: "text" as const, text: "图片已发送" }] }; },
 );
 
 mcpServer.tool(
   "send_file",
   "发送本地文件到飞书。file_path 为本地文件绝对路径。",
-  { file_path: z.string().describe("文件绝对路径") },
-  async ({ file_path }) => { await sender.sendFile(file_path); return { content: [{ type: "text" as const, text: "文件已发送" }] }; },
+  {
+    file_path: z.string().describe("文件绝对路径"),
+    message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+  },
+  async ({ file_path, message_id }) => { await sender.sendFile(file_path, message_id); return { content: [{ type: "text" as const, text: "文件已发送" }] }; },
 );
 
 // ── 应用管理工具（仅在 Daemon 模式下注册）─────────────────

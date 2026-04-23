@@ -33,6 +33,7 @@ export interface AppConfig {
   verifiedMcpServers: string[]
   /** 主会话 chatId 映射（workspaceDir → chatId），用于 --resume 恢复上下文 */
   mainChatIds: Record<string, string>
+  enableGroupChat: boolean
 }
 
 const defaults: AppConfig = {
@@ -53,6 +54,7 @@ const defaults: AppConfig = {
   scheduledTasks: [],
   verifiedMcpServers: [],
   mainChatIds: {},
+  enableGroupChat: false,
 }
 
 const store = new Store<AppConfig>({

@@ -18,7 +18,7 @@ export function getQueueDir(): string {
   return queueDir;
 }
 
-export function pushToFileQueue(text: string, messageId?: string, source?: string): boolean {
+export function pushToFileQueue(text: string, messageId?: string, source?: string, chatId?: string, chatType?: string): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const ts = Date.now();
@@ -36,7 +36,11 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   }
 
   try {
-    const data = JSON.stringify({ text, messageId: id, timestamp: ts, source: source || `pid-${process.pid}` });
+    const data = JSON.stringify({
+      text, messageId: id, timestamp: ts,
+      source: source || `pid-${process.pid}`,
+      chatId: chatId || "", chatType: chatType || "",
+    });
     const tmpPath = path.join(queueDir, filename + ".tmp");
     const finalPath = path.join(queueDir, filename);
     fs.writeFileSync(tmpPath, data, "utf-8");
@@ -47,7 +51,14 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
   }
 }
 
-export function claimNextMessage(): string | null {
+export interface QueueMessage {
+  text: string;
+  messageId: string;
+  chatId: string;
+  chatType: string;
+}
+
+export function claimNextMessage(filterChatId?: string): QueueMessage | null {
   if (!queueDir) return null;
 
   let files: string[];
@@ -59,6 +70,15 @@ export function claimNextMessage(): string | null {
 
   for (const file of files) {
     const srcPath = path.join(queueDir, file);
+
+    if (filterChatId) {
+      try {
+        const raw = fs.readFileSync(srcPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if ((parsed.chatId || "") !== filterChatId) continue;
+      } catch { continue; }
+    }
+
     const claimedPath = srcPath.replace(/\.qmsg$/, ".claimed");
     try {
       fs.renameSync(srcPath, claimedPath);
@@ -69,7 +89,12 @@ export function claimNextMessage(): string | null {
       const raw = fs.readFileSync(claimedPath, "utf-8");
       fs.unlinkSync(claimedPath);
       const parsed = JSON.parse(raw);
-      return typeof parsed.text === "string" ? parsed.text : raw;
+      return {
+        text: typeof parsed.text === "string" ? parsed.text : raw,
+        messageId: parsed.messageId || "",
+        chatId: parsed.chatId || "",
+        chatType: parsed.chatType || "",
+      };
     } catch {
       try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
       continue;
@@ -78,14 +103,19 @@ export function claimNextMessage(): string | null {
   return null;
 }
 
-export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS): Promise<string | null> {
+export function claimNextMessageText(filterChatId?: string): string | null {
+  const msg = claimNextMessage(filterChatId);
+  return msg ? msg.text : null;
+}
+
+export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<QueueMessage | null> {
   return new Promise((resolve) => {
-    const immediate = claimNextMessage();
+    const immediate = claimNextMessage(filterChatId);
     if (immediate !== null) { resolve(immediate); return; }
 
     const deadline = Date.now() + timeoutMs;
     const timer = setInterval(() => {
-      const msg = claimNextMessage();
+      const msg = claimNextMessage(filterChatId);
       if (msg !== null) { clearInterval(timer); resolve(msg); return; }
       if (Date.now() >= deadline) { clearInterval(timer); resolve(null); }
     }, intervalMs);
@@ -93,17 +123,21 @@ export function pollFileQueue(timeoutMs: number, intervalMs = POLL_INTERVAL_MS):
   });
 }
 
-export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS): Promise<string | null> {
-  const first = await pollFileQueue(timeoutMs, intervalMs);
+export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<QueueMessage | null> {
+  const first = await pollFileQueue(timeoutMs, intervalMs, filterChatId);
   if (first === null) return null;
 
-  const messages = [first];
-  let extra = claimNextMessage();
+  const parts = [first.text];
+  let extra = claimNextMessage(filterChatId);
   while (extra !== null) {
-    messages.push(extra);
-    extra = claimNextMessage();
+    parts.push(extra.text);
+    extra = claimNextMessage(filterChatId);
   }
-  return messages.join("\n");
+  return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType };
+}
+
+export function pollFileQueueBatchText(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<string | null> {
+  return pollFileQueueBatch(timeoutMs, intervalMs, filterChatId).then((m) => m?.text ?? null);
 }
 
 export function getQueueLength(): number {
@@ -115,7 +149,7 @@ export function getQueueLength(): number {
   }
 }
 
-export function getQueueMessages(): { index: number; preview: string }[] {
+export function getQueueMessages(): { index: number; preview: string; chatId?: string; chatType?: string }[] {
   if (!queueDir) return [];
   try {
     const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg")).sort();
@@ -123,7 +157,7 @@ export function getQueueMessages(): { index: number; preview: string }[] {
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
-        return { index: i, preview: (parsed.text ?? "").slice(0, 200) };
+        return { index: i, preview: (parsed.text ?? "").slice(0, 200), chatId: parsed.chatId || undefined, chatType: parsed.chatType || undefined };
       } catch {
         return { index: i, preview: "(unreadable)" };
       }
@@ -131,6 +165,24 @@ export function getQueueMessages(): { index: number; preview: string }[] {
   } catch {
     return [];
   }
+}
+
+export function getDistinctChatIds(): { chatId: string; chatType: string }[] {
+  if (!queueDir) return [];
+  const map = new Map<string, string>();
+  try {
+    const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg"));
+    for (const f of files) {
+      try {
+        const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
+        const parsed = JSON.parse(raw);
+        if (parsed.chatId && !map.has(parsed.chatId)) {
+          map.set(parsed.chatId, parsed.chatType || "p2p");
+        }
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+  return [...map.entries()].map(([chatId, chatType]) => ({ chatId, chatType }));
 }
 
 export function cleanupStaleMessages(): void {

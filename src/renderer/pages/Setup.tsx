@@ -255,14 +255,15 @@ export default function Setup({ onComplete }: Props) {
               </div>
               <div>
                 <label className="mb-1 block text-sm text-gray-300">
-                  Receive ID <span className="text-gray-600">(接收消息的用户/群组)</span>
+                  Receive ID <span className="text-gray-600">(收到首条消息后自动填写，无需手动配置)</span>
                 </label>
                 <input
                   type="text"
                   value={receiveId}
-                  onChange={(e) => setReceiveId(e.target.value)}
-                  placeholder="ou_xxxxxxxxx 或 oc_xxxxxxxxx"
-                  className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm outline-none transition focus:border-blue-500"
+                  readOnly
+                  tabIndex={-1}
+                  placeholder="将在收到飞书消息后自动检测"
+                  className="w-full cursor-default rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm opacity-70 outline-none"
                 />
               </div>
               <div>

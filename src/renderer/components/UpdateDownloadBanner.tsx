@@ -1,21 +1,26 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
 export default function UpdateDownloadBanner() {
   const [pct, setPct] = useState<number | null>(null)
+  const active = useRef(false)
 
   useEffect(() => {
     const offS = window.electronAPI.onUpdaterStatus((s) => {
       if (s.kind === "downloading") {
+        active.current = true
         setPct(0)
       }
-      if (s.kind === "downloaded") {
+      if (s.kind === "downloaded" || s.kind === "available") {
+        active.current = false
         setPct(null)
       }
     })
     const offP = window.electronAPI.onUpdaterProgress((p) => {
+      if (!active.current) return
       setPct(Math.round(p))
     })
     const offE = window.electronAPI.onUpdaterError(() => {
+      active.current = false
       setPct(null)
     })
     return () => {

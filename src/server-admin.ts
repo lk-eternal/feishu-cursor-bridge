@@ -57,6 +57,7 @@ export function registerAdminTools(mcpServer: McpServer): void {
           const t = data.tasks ?? {};
           const lines = [
             `🛡️ Daemon: 运行中 (v${d.version}, ${Math.floor((d.uptime ?? 0) / 60)}分钟)`,
+            `🤖 Agent: ${d.agentRunning ? "运行中" : "未运行"}${d.sessionAgentCount > 0 ? ` (${d.sessionAgentCount} 个会话)` : ""}`,
             `📭 队列消息: ${q.length ?? 0} 条`,
             `⏰ 定时任务: 启用 ${t.enabled ?? 0} / 共 ${t.total ?? 0}`,
           ];

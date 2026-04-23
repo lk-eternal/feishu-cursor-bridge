@@ -199,8 +199,9 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       queueLength: health.queueLength as number,
       hasTarget: health.hasTarget as boolean,
       autoOpenId: health.autoOpenId as string | null,
-      agentRunning: isAgentRunning(),
+      agentRunning: isAgentRunning() || sessionAgents.size > 0,
       agentPid: agentChild?.pid ?? null,
+      sessionAgentCount: getRunningSessionCount(),
       model: cfgModel,
     }
     if (status.autoOpenId && !config.larkReceiveId) {
@@ -415,6 +416,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
 export async function stopDaemon(): Promise<void> {
   stopStatusPolling()
   stopAgent()
+  stopAllSessionAgents()
   logBuffer.length = 0
 
   if (cachedPort) {
@@ -513,14 +515,11 @@ function startStatusPolling(): void {
       queueStaleStartTime = null
     }
 
-    if (status.running && status.queueLength && status.queueLength > 0 && !isAgentRunning()) {
-      await new Promise((r) => setTimeout(r, 1000))
-      const bundled = await pullMergedMessagesFromQueue()
-      if (bundled) {
-        broadcastLog(`检测到排队消息 ${bundled.count} 条，合并后自动拉起 Agent`)
-        launchAgent(bundled.text)
-      }
+    if (status.running && status.queueLength && status.queueLength > 0) {
+      await dispatchSessionAgents()
     }
+
+    reapIdleGroupAgents()
 
     if (status.running) {
       await checkAndExecutePendingCommands()
@@ -536,31 +535,69 @@ function stopStatusPolling(): void {
   stopDaemonPowerSaveBlock()
 }
 
-/**
- * 一次性取出当前队列中全部消息并合并为一段文本（多条的格式便于 Agent 分批处理）。
- */
-async function pullMergedMessagesFromQueue(): Promise<{ text: string; count: number } | null> {
+interface DequeuedMessage { text: string; chatId: string; chatType: string }
+
+async function pullMergedMessagesFromQueue(chatId?: string): Promise<{ text: string; count: number; chatType?: string } | null> {
   const lock = readLockFile()
   if (!lock?.port) return null
   try {
-    const res = (await httpPost(`http://127.0.0.1:${lock.port}/dequeue-all`, {}, 10_000)) as {
-      messages?: string[]
+    const body = chatId ? { chatId } : {}
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/dequeue-all`, body, 10_000)) as {
+      messages?: (DequeuedMessage | string)[]
     } | null
     const msgs = res?.messages ?? []
-    if (msgs.length === 0) {
-      return null
-    }
-    const trimmed = msgs.map((t) => (typeof t === "string" ? t.trim() : "")).filter((t) => t.length > 0)
-    if (trimmed.length === 0) {
-      return null
-    }
-    const text =
-      trimmed.length === 1
-        ? trimmed[0]
-        : trimmed.map((t, i) => `【消息 ${i + 1}】\n${t}`).join("\n\n")
-    return { text, count: trimmed.length }
+    if (msgs.length === 0) return null
+
+    const parsed: DequeuedMessage[] = msgs
+      .map((m) => (typeof m === "string" ? { text: m, chatId: "", chatType: "" } : m))
+      .filter((m) => m.text?.trim())
+
+    if (parsed.length === 0) return null
+
+    const chatType = parsed[0].chatType || undefined
+
+    const text = parsed.length === 1
+      ? parsed[0].text.trim()
+      : parsed.map((m, i) => `【消息 ${i + 1}】\n${m.text.trim()}`).join("\n\n")
+
+    return { text, count: parsed.length, chatType }
   } catch {
     return null
+  }
+}
+
+async function getQueueChats(): Promise<{ chatId: string; chatType: string }[]> {
+  const lock = readLockFile()
+  if (!lock?.port) return []
+  try {
+    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: { chatId: string; chatType: string }[] } | null
+    return res?.chats ?? []
+  } catch {
+    return []
+  }
+}
+
+async function dispatchSessionAgents(): Promise<void> {
+  injectMcpToGlobal()
+  const chats = await getQueueChats()
+  if (chats.length === 0 && !isAgentRunning()) {
+    const bundled = await pullMergedMessagesFromQueue()
+    if (bundled) {
+      broadcastLog(`检测到排队消息 ${bundled.count} 条，合并后自动拉起 Agent`)
+      launchAgent(bundled.text, bundled.chatType)
+    }
+    return
+  }
+  for (const { chatId, chatType } of chats) {
+    const sessionKey = chatType === "p2p" ? P2P_SESSION_KEY : chatId
+    if (isSessionAgentRunning(sessionKey)) continue
+    await new Promise((r) => setTimeout(r, 500))
+    const bundled = await pullMergedMessagesFromQueue(chatId)
+    if (bundled) {
+      broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 有 ${bundled.count} 条消息，自动拉起`)
+      const result = launchSessionAgent(sessionKey, chatType as "p2p" | "group", bundled.text)
+      if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
+    }
   }
 }
 
@@ -573,12 +610,12 @@ export async function clearMessageQueue(): Promise<number> {
   } catch { return 0 }
 }
 
-export async function getQueueMessages(): Promise<{ index: number; preview: string }[]> {
+export async function getQueueMessages(): Promise<{ index: number; preview: string; chatId?: string; chatType?: string }[]> {
   const lock = readLockFile()
   if (!lock?.port) return []
   try {
     const res = await httpGet(`http://127.0.0.1:${lock.port}/queue`) as {
-      messages?: { index: number; preview: string }[]
+      messages?: { index: number; preview: string; chatId?: string; chatType?: string }[]
     }
     return res.messages ?? []
   } catch {
@@ -831,31 +868,12 @@ export function getLogBuffer(): string[] {
  * 按优先级检查全局和项目 mcp.json 中是否已存在指定 serverKey。
  * 存在则返回该文件路径（原地更新），都不存在返回 null（将注入项目目录）。
  */
-function findExistingMcpLocation(globalPath: string, projectPath: string, serverKey: string): string | null {
-  for (const p of [globalPath, projectPath]) {
-    try {
-      if (!fs.existsSync(p)) continue
-      const config = JSON.parse(fs.readFileSync(p, "utf-8"))
-      const servers = config?.mcpServers as Record<string, unknown> | undefined
-      if (servers && serverKey in servers) return p
-    } catch { /* ignore parse error */ }
-  }
-  return null
-}
+let lastInjectedMcpHash = ""
 
-export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean } {
+function injectMcpToGlobal(): boolean {
   const config = getConfig()
-  const wsDir = config.workspaceDir
-  if (!wsDir) return { mcpOk: false, ruleOk: false }
-
-  const cursorDir = path.join(wsDir, ".cursor")
-  if (!fs.existsSync(cursorDir)) fs.mkdirSync(cursorDir, { recursive: true })
-
-  let mcpOk = false
   try {
     const globalMcpJsonPath = path.join(os.homedir(), ".cursor", "mcp.json")
-    const projectMcpJsonPath = path.join(cursorDir, "mcp.json")
-
     const env: Record<string, string> = {
       LARK_APP_ID: config.larkAppId || "",
       LARK_APP_SECRET: config.larkAppSecret || "",
@@ -864,35 +882,41 @@ export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean 
     }
     if (cachedPort) env.LARK_DAEMON_PORT = String(cachedPort)
 
-    const serverEntry = {
-      command: "npx",
-      args: ["-y", "lark-bridge-mcp@latest"],
-      env,
-    }
+    const serverEntry = { command: "npx", args: ["-y", "lark-bridge-mcp@latest"], env }
     const serverKey = "feishu-cursor-bridge"
+    const entryJson = JSON.stringify(serverEntry)
 
-    const targetPath = findExistingMcpLocation(globalMcpJsonPath, projectMcpJsonPath, serverKey) ?? projectMcpJsonPath
+    if (lastInjectedMcpHash === entryJson) return true
 
     let mcpConfig: Record<string, unknown> = {}
-    if (fs.existsSync(targetPath)) {
-      try { mcpConfig = JSON.parse(fs.readFileSync(targetPath, "utf-8")) } catch { mcpConfig = {} }
+    if (fs.existsSync(globalMcpJsonPath)) {
+      try { mcpConfig = JSON.parse(fs.readFileSync(globalMcpJsonPath, "utf-8")) } catch { mcpConfig = {} }
     }
     const servers = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
+
+    if (JSON.stringify(servers[serverKey]) === entryJson) {
+      lastInjectedMcpHash = entryJson
+      return true
+    }
+
     servers[serverKey] = serverEntry
     mcpConfig.mcpServers = servers
 
-    const targetDir = path.dirname(targetPath)
-    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true })
-    fs.writeFileSync(targetPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    mcpOk = true
-    broadcastLog(`MCP 配置已${targetPath === projectMcpJsonPath ? "注入" : "更新"}: ${targetPath}`)
+    const globalDir = path.dirname(globalMcpJsonPath)
+    if (!fs.existsSync(globalDir)) fs.mkdirSync(globalDir, { recursive: true })
+    fs.writeFileSync(globalMcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
+    lastInjectedMcpHash = entryJson
+    broadcastLog(`MCP 配置已更新: ${globalMcpJsonPath}`)
+    return true
   } catch (e: unknown) {
     broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
+    return false
   }
+}
 
-  let ruleOk = false
+function injectRulesToDir(wsDir: string): boolean {
   try {
-    const rulesDir = path.join(cursorDir, "rules")
+    const rulesDir = path.join(wsDir, ".cursor", "rules")
     if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
     const rulePath = path.join(rulesDir, "feishu-cursor-bridge.mdc")
     const ruleContent = [
@@ -936,16 +960,50 @@ export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean 
       "- **上下文连续性:** 无论轮询持续多久（即使长达数小时），收到回复后必须基于之前的历史记录继续执行，不得要求用户重新输入背景信息。",
     ].join("\r\n")
     fs.writeFileSync(rulePath, ruleContent, "utf-8")
-    ruleOk = true
     broadcastLog(`规则已注入: ${rulePath}`)
+    return true
   } catch (e: unknown) {
     broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
+    return false
   }
+}
 
+export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean } {
+  const config = getConfig()
+  const mcpOk = injectMcpToGlobal()
+  const ruleOk = config.workspaceDir ? injectRulesToDir(config.workspaceDir) : false
   return { mcpOk, ruleOk }
 }
 
 // ── Agent CLI 拉起 ───────────────────────────────────────
+
+// ── 多 Agent 会话 ──────────────────────────────────────────
+const P2P_SESSION_KEY = "__p2p__"
+const GROUP_IDLE_TIMEOUT_MS = 30 * 60 * 1000
+
+interface SessionAgent {
+  sessionKey: string
+  child: ChildProcess
+  pid: number
+  startedAt: number
+  lastActivityAt: number
+  chatType: "p2p" | "group"
+}
+
+const sessionAgents = new Map<string, SessionAgent>()
+
+function broadcastSessionStatus(): void {
+  const list = [...sessionAgents.values()].map((s) => ({
+    sessionKey: s.sessionKey,
+    pid: s.pid,
+    startedAt: s.startedAt,
+    lastActivityAt: s.lastActivityAt,
+    chatType: s.chatType,
+  }))
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send("agent:sessions", list)
+  }
+}
 
 let agentChild: ChildProcess | null = null
 let agentNodePath = ""
@@ -1262,6 +1320,20 @@ function isAgentRunning(): boolean {
   return agentChild !== null && !agentChild.killed && agentChild.exitCode === null
 }
 
+function isSessionAgentRunning(sessionKey: string): boolean {
+  const sa = sessionAgents.get(sessionKey)
+  return sa !== null && sa !== undefined && !sa.child.killed && sa.child.exitCode === null
+}
+
+function getRunningSessionCount(): number {
+  let count = 0
+  for (const sa of sessionAgents.values()) {
+    if (!sa.child.killed && sa.child.exitCode === null) count++
+  }
+  if (isAgentRunning()) count++
+  return count
+}
+
 function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false): string[] {
   const args = [
     "--print",
@@ -1404,7 +1476,7 @@ function ensureMainChatId(config: AppConfig, spawnEnv: Record<string, string>): 
   return getMainChatId(config) || createChatId(config, spawnEnv)
 }
 
-export function launchAgent(initialMessage?: string): { ok: boolean; error?: string } {
+export function launchAgent(initialMessage?: string, chatType?: string): { ok: boolean; error?: string } {
   if (isAgentRunning()) return { ok: true }
 
   const now = Date.now()
@@ -1415,8 +1487,9 @@ export function launchAgent(initialMessage?: string): { ok: boolean; error?: str
   if (!config.workspaceDir) return { ok: false, error: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
 
+  const chatLabel = chatType === "group" ? "[群聊消息]" : chatType === "p2p" ? "[私聊消息]" : ""
   const prompt = initialMessage
-    ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是待处理的消息或定时任务：\n\n${initialMessage}`
+    ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是待处理的消息或定时任务：\n\n${chatLabel ? chatLabel + "\n" : ""}${initialMessage}`
     : "请遵守飞书工作流规则feishu-cursor-bridge开始工作,先获取待处理的飞书消息，然后根据消息内容开始工作。"
 
   const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent" }
@@ -1450,6 +1523,116 @@ export function stopAgent(): void {
     try { agentChild.kill("SIGTERM") } catch { /* ignore */ }
   }
   agentChild = null
+}
+
+export function launchSessionAgent(sessionKey: string, chatType: "p2p" | "group", initialMessage?: string): { ok: boolean; error?: string } {
+  if (isSessionAgentRunning(sessionKey)) {
+    const sa = sessionAgents.get(sessionKey)!
+    sa.lastActivityAt = Date.now()
+    return { ok: true }
+  }
+
+  const config = getConfig()
+  let workDir = config.workspaceDir
+  if (chatType === "group") {
+    if (!config.enableGroupChat) return { ok: false, error: "群聊未启用" }
+    const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
+    workDir = path.join(app.getPath("userData"), "group-workspaces", safeChatId)
+    if (!fs.existsSync(workDir)) {
+      fs.mkdirSync(workDir, { recursive: true })
+      broadcastLog(`[Agent] 为群聊创建工作目录: ${workDir}`)
+    }
+    const staleProjectMcp = path.join(workDir, ".cursor", "mcp.json")
+    if (fs.existsSync(staleProjectMcp)) {
+      try { fs.unlinkSync(staleProjectMcp) } catch { /* ignore */ }
+    }
+    injectRulesToDir(workDir)
+  }
+
+  if (!workDir) return { ok: false, error: "工作目录未配置" }
+  if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
+
+  const chatLabel = chatType === "group" ? `[群聊会话 chat_id=${sessionKey}]` : "[私聊会话]"
+  const prompt = initialMessage
+    ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是待处理的消息或定时任务：\n\n${chatLabel}\n${initialMessage}`
+    : `请遵守飞书工作流规则feishu-cursor-bridge开始工作,${chatLabel} 先获取待处理的飞书消息，然后根据消息内容开始工作。`
+
+  const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent" }
+  delete spawnEnv.NODE_USE_ENV_PROXY
+  applyProxyEnv(spawnEnv, config)
+  spawnEnv.LARK_WORKSPACE_DIR = workDir
+
+  const overrideConfig = { ...config, workspaceDir: workDir }
+  const chatId = ensureMainChatId(overrideConfig, spawnEnv)
+  const resumeChatId: string | false = chatId || false
+  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId)
+
+  try {
+    let child: ChildProcess
+    const ws = workDir.trim() || undefined
+    logCursorAgentInvocation(`session-${sessionKey}`, args, ws)
+    if (agentNodePath && agentIndexPath) {
+      child = spawn(agentNodePath, [agentIndexPath, ...args], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv })
+    } else {
+      child = spawn("agent", args.map(quoteArg), { shell: process.platform === "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv })
+    }
+
+    const agentOutBuf = { current: "" }
+    const agentErrBuf = { current: "" }
+    child.stdout?.on("data", (d: Buffer) => flushAgentStreamChunk(agentOutBuf, d.toString(), "stdout"))
+    child.stderr?.on("data", (d: Buffer) => flushAgentStreamChunk(agentErrBuf, d.toString(), "stderr"))
+
+    child.on("close", (code, signal) => {
+      if (agentOutBuf.current.trim()) { pushUiLog("Agent", "INFO", agentOutBuf.current.trim()); agentOutBuf.current = "" }
+      if (agentErrBuf.current.trim()) { pushUiLog("Agent", "WARN", agentErrBuf.current.trim()); agentErrBuf.current = "" }
+      pushUiLog("Agent", "INFO", `[${sessionKey}] 退出 code=${code}${signal ? ` signal=${signal}` : ""}`)
+      sessionAgents.delete(sessionKey)
+      broadcastSessionStatus()
+    })
+    child.on("error", (e) => {
+      pushUiLog("Agent", "ERROR", `[${sessionKey}] 进程错误: ${e.message}`)
+      sessionAgents.delete(sessionKey)
+      broadcastSessionStatus()
+    })
+
+    sessionAgents.set(sessionKey, { sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(), chatType })
+    broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 已启动, pid=${child.pid}`)
+    broadcastSessionStatus()
+    return { ok: true }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e)
+    broadcastLog(`[Agent] 启动失败 ${sessionKey}: ${msg}`, "ERROR")
+    return { ok: false, error: msg }
+  }
+}
+
+export function stopSessionAgent(sessionKey: string): void {
+  const sa = sessionAgents.get(sessionKey)
+  if (sa && !sa.child.killed) {
+    try { sa.child.kill("SIGTERM") } catch { /* ignore */ }
+  }
+  sessionAgents.delete(sessionKey)
+  broadcastSessionStatus()
+}
+
+export function stopAllSessionAgents(): void {
+  for (const [key] of sessionAgents) stopSessionAgent(key)
+}
+
+export function getSessionAgentList(): { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[] {
+  return [...sessionAgents.values()].map((s) => ({
+    sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt, chatType: s.chatType, lastActivityAt: s.lastActivityAt,
+  }))
+}
+
+function reapIdleGroupAgents(): void {
+  const now = Date.now()
+  for (const [key, sa] of sessionAgents) {
+    if (sa.chatType === "group" && (now - sa.lastActivityAt > GROUP_IDLE_TIMEOUT_MS)) {
+      broadcastLog(`[Agent] 群聊会话 ${key} 空闲 ${Math.round((now - sa.lastActivityAt) / 60_000)} 分钟，自动回收`)
+      stopSessionAgent(key)
+    }
+  }
 }
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
@@ -2736,6 +2919,9 @@ export function initDaemonManager(): void {
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:launch", () => launchAgent())
   ipcMain.handle("agent:stop", () => { stopAgent(); return { ok: true } })
+  ipcMain.handle("agent:sessions", () => getSessionAgentList())
+  ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
+  ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
   ipcMain.handle("scheduled-tasks:get", () => {
     return readTasksFromFile()
@@ -2788,6 +2974,7 @@ export function initDaemonManager(): void {
 export function cleanupDaemonManager(): void {
   stopStatusPolling()
   stopAgent()
+  stopAllSessionAgents()
   if (daemonProcess) {
     try { daemonProcess.kill() } catch { /* ignore */ }
     daemonProcess = null

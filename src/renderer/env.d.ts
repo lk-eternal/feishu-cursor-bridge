@@ -63,6 +63,7 @@ interface DaemonStatus {
   autoOpenId?: string | null
   agentRunning?: boolean
   agentPid?: number | null
+  sessionAgentCount?: number
   cliAvailable?: boolean
   error?: string
   model?: string
@@ -120,6 +121,10 @@ interface ElectronAPI {
   stopDaemon(): Promise<void>
   launchAgent(): Promise<{ ok: boolean; error?: string }>
   stopAgent(): Promise<{ ok: boolean }>
+  getSessionAgents(): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]>
+  stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
+  stopAllSessionAgents(): Promise<{ ok: boolean }>
+  onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]) => void): () => void
   getDaemonStatus(): Promise<DaemonStatus>
   readLogs(lines?: number): Promise<string>
   getLogBuffer(): Promise<string[]>

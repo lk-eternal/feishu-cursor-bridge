@@ -8,15 +8,17 @@ import {
   stopDaemonScheduledTasks,
   setDaemonSchedulerLogger,
 } from "./daemon-scheduled-tasks.js";
-import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender } from "./shared/lark-core.js";
+import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
 import {
   initFileQueue as _initFileQueue,
   getQueueDir,
   pushToFileQueue,
   claimNextMessage,
-  pollFileQueueBatch,
+  claimNextMessageText,
+  pollFileQueueBatchText,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
+  getDistinctChatIds,
   cleanupStaleMessages,
 } from "./file-queue.js";
 
@@ -91,14 +93,14 @@ function initFileQueue(): void {
   cleanupStaleMessages();
 }
 
-function pushMessage(content: string, messageId?: string): void {
+function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string): void {
   if (!content?.trim()) {
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
     return;
   }
-  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`);
+  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, chatId, chatType);
   if (written) {
-    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"})`);
+    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"})`);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -119,16 +121,34 @@ function clearFileQueue(): number {
 
 // ── 飞书 WebSocket 长连接 ────────────────────────────────
 
+function isBotMentioned(ev: LarkMessageEvent): boolean {
+  return ev.mentions.some((m) => m.name === "" || m.key === "@_all" || m.id === "");
+}
+
+function stripMentionTags(text: string): string {
+  return text.replace(/@_user_\d+/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
 function startLarkConnection(): void {
   if (!APP_ID || !APP_SECRET) { log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置"); return; }
 
-  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (text, messageId, messageType, rawContent, senderOpenId) => {
-    if (senderOpenId && !sender.resolvedTarget) {
+  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
+    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId, mentions } = ev;
+
+    if (chatType === "p2p" && senderOpenId && !sender.resolvedTarget) {
       sender.autoOpenId = senderOpenId;
+      log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
     }
 
-    if (messageType === "text" && isCommand(text)) {
-      handleCommand(text, messageId).catch((e: any) =>
+    if (chatType === "group" && mentions.length === 0) {
+      return;
+    }
+
+    const cleanText = chatType === "group" ? stripMentionTags(text) : text;
+    log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}: ${cleanText.slice(0, 100)}`);
+
+    if (messageType === "text" && isCommand(cleanText)) {
+      handleCommand(cleanText, messageId).catch((e: any) =>
         log("ERROR", `指令处理失败: ${e?.message ?? e}`),
       );
       return;
@@ -136,10 +156,10 @@ function startLarkConnection(): void {
 
     if (messageType === "image" || messageType === "post") {
       sender.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => pushMessage(result, messageId))
-        .catch(() => pushMessage(text, messageId));
+        .then((result) => pushMessage(result, messageId, chatId, chatType))
+        .catch(() => pushMessage(cleanText, messageId, chatId, chatType));
     } else {
-      pushMessage(text, messageId);
+      pushMessage(cleanText, messageId, chatId, chatType);
     }
   });
 }
@@ -371,15 +391,23 @@ function startHttpServer(): Promise<number> {
         }
 
         if (method === "GET" && pathname === "/dequeue") {
-          json(res, { message: claimNextMessage(), queueLength: getFileQueueLength() });
+          const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
+          json(res, { message: claimNextMessageText(chatIdFilter), queueLength: getFileQueueLength() });
           return;
         }
 
         if (method === "POST" && pathname === "/dequeue-all") {
-          const messages: string[] = [];
-          let m: string | null;
-          while ((m = claimNextMessage()) !== null) messages.push(m);
+          const body = await readBody(req).catch(() => "{}");
+          const { chatId: filterChat } = JSON.parse(body || "{}") as { chatId?: string };
+          const messages: { text: string; chatId: string; chatType: string }[] = [];
+          let m: ReturnType<typeof claimNextMessage>;
+          while ((m = claimNextMessage(filterChat)) !== null) messages.push(m);
           json(res, { ok: true, messages, queueLength: getFileQueueLength() });
+          return;
+        }
+
+        if (method === "GET" && pathname === "/queue-chat-ids") {
+          json(res, { chats: getDistinctChatIds() });
           return;
         }
 
@@ -405,9 +433,10 @@ function startHttpServer(): Promise<number> {
 
         if (method === "GET" && pathname === "/poll") {
           const timeout = Number(reqUrl.searchParams.get("timeout") ?? "20000");
+          const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
           let disconnected = false;
           req.on("close", () => { disconnected = true; });
-          const reply = await pollFileQueueBatch(timeout);
+          const reply = await pollFileQueueBatchText(timeout, undefined, chatIdFilter);
           if (disconnected && reply !== null) {
             pushToFileQueue(reply);
             log("WARN", `/poll 连接断开，消息放回队列`);

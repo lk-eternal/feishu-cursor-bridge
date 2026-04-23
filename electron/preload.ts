@@ -6,6 +6,7 @@ export interface AppConfig {
   larkReceiveId: string
   larkReceiveIdType: "open_id" | "user_id" | "chat_id"
   workspaceDir: string
+  enableGroupChat: boolean
   model: string
   autoStart: boolean
   setupComplete: boolean
@@ -22,6 +23,7 @@ export interface DaemonStatus {
   uptime?: number
   agentRunning?: boolean
   agentPid?: number | null
+  sessionAgentCount?: number
   queueLength?: number
   hasTarget?: boolean
   autoOpenId?: string | null
@@ -152,6 +154,15 @@ const api = {
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
   launchAgent: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("agent:launch"),
   stopAgent: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop"),
+  getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]> =>
+    ipcRenderer.invoke("agent:sessions"),
+  stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
+  stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
+  onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, list: any) => cb(list)
+    ipcRenderer.on("agent:sessions", handler)
+    return () => { ipcRenderer.removeListener("agent:sessions", handler) }
+  },
   stopDaemon: (): Promise<void> => ipcRenderer.invoke("daemon:stop"),
   getDaemonStatus: (): Promise<DaemonStatus> => ipcRenderer.invoke("daemon:status"),
   readLogs: (lines?: number): Promise<string> => ipcRenderer.invoke("logs:read", lines),

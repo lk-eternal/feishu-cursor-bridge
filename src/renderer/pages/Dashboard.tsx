@@ -37,6 +37,8 @@ export default function Dashboard({ onSettings }: Props) {
   const [stoppingAgent, setStoppingAgent] = useState(false)
   const [clearingQueue, setClearingQueue] = useState(false)
   const [configModel, setConfigModel] = useState("")
+  const [showSessions, setShowSessions] = useState(false)
+  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]>([])
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
@@ -111,11 +113,15 @@ export default function Dashboard({ onSettings }: Props) {
       cancelCliSchedule = () => clearTimeout(cliTimer)
     }
 
+    window.electronAPI.getSessionAgents().then(setSessionList).catch(() => {})
+    const unsubSessions = window.electronAPI.onSessionAgents?.((list: typeof sessionList) => setSessionList(list))
+
     return () => {
       clearInterval(timer)
       cancelCliSchedule?.()
       unsub()
       unsubLog()
+      unsubSessions?.()
     }
   }, [])
 
@@ -220,7 +226,11 @@ export default function Dashboard({ onSettings }: Props) {
   const handleStopAgent = async () => {
     setStoppingAgent(true)
     try {
-      await window.electronAPI.stopAgent()
+      await Promise.all([
+        window.electronAPI.stopAgent(),
+        window.electronAPI.stopAllSessionAgents(),
+      ])
+      setSessionList([])
       const s = await window.electronAPI.getDaemonStatus()
       setStatus(s)
     } catch { /* ignore */ }
@@ -332,24 +342,30 @@ export default function Dashboard({ onSettings }: Props) {
           color={status.hasTarget ? "green" : "gray"}
           sub={status.hasTarget ? "发送目标已就绪" : "等待目标"}
         />
-        <StatusCard
-          icon={Bot}
-          label="Agent"
-          value={status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"}
-          color={status.agentRunning ? "blue" : "gray"}
-          sub={`模型: ${status.model || configModel || "auto"}`}
-          action={status.agentRunning ? (
-            <button
-              onClick={handleStopAgent}
-              disabled={stoppingAgent}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
-              title="停止 Agent"
-            >
-              {stoppingAgent ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
-              停止
-            </button>
-          ) : undefined}
-        />
+        <div onClick={() => { if (sessionList.length > 0 || status.agentRunning) setShowSessions((v) => !v) }} className={sessionList.length > 0 || status.agentRunning ? "cursor-pointer" : ""}>
+          <StatusCard
+            icon={Bot}
+            label="Agent"
+            value={
+              sessionList.length > 0
+                ? `${sessionList.length} 个会话`
+                : status.agentRunning ? `会话中 PID:${status.agentPid}` : "空闲"
+            }
+            color={status.agentRunning || sessionList.length > 0 ? "blue" : "gray"}
+            sub={sessionList.length > 0 ? "点击查看详情" : `模型: ${status.model || configModel || "auto"}`}
+            action={status.agentRunning || sessionList.length > 0 ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); handleStopAgent() }}
+                disabled={stoppingAgent}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-400 transition hover:bg-red-600/20 disabled:opacity-50"
+                title="停止全部 Agent"
+              >
+                {stoppingAgent ? <Loader2 size={10} className="animate-spin" /> : <Square size={10} />}
+                停止
+              </button>
+            ) : undefined}
+          />
+        </div>
         <div onClick={toggleQueue} className="cursor-pointer">
           <StatusCard
             icon={MessageSquare}
@@ -372,17 +388,43 @@ export default function Dashboard({ onSettings }: Props) {
         </div>
       </div>
 
+      {showSessions && sessionList.length > 0 && (
+        <div className="mx-6 rounded-xl border border-gray-800 bg-gray-900/80 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-400">活跃会话</span>
+            <button onClick={async () => { await window.electronAPI.stopAllSessionAgents(); setSessionList([]) }} className="text-xs text-red-400 hover:text-red-300">全部停止</button>
+          </div>
+          <div className="space-y-1.5">
+            {sessionList.map((s) => (
+              <div key={s.sessionKey} className="flex items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : "bg-blue-400"}`} />
+                  <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
+                    {s.chatType === "group" ? "群聊" : "私聊"} {s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey}
+                  </span>
+                  <span className="text-xs text-gray-600">PID:{s.pid}</span>
+                </div>
+                <button onClick={() => window.electronAPI.stopSessionAgent(s.sessionKey)} className="rounded px-1.5 py-0.5 text-xs text-red-400 hover:bg-red-600/20" title="停止此会话">
+                  <Square size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Queue messages */}
       {showQueue && queueMessages.length > 0 && (
         <div className="mx-6 space-y-1 rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-3">
           <div className="mb-2 text-xs font-medium text-yellow-400">
             待处理消息 ({queueMessages.length})
           </div>
-          {queueMessages.map((msg) => (
+          {queueMessages.map((msg: any) => (
             <div
               key={msg.index}
               className="rounded border border-gray-800 bg-gray-900/50 px-3 py-2 text-xs text-gray-300"
             >
+              {msg.chatId && <span className="mr-2 rounded bg-gray-700/80 px-1.5 py-0.5 text-[10px] text-gray-400">{msg.chatType === "group" ? "群聊" : "私聊"}</span>}
               {msg.preview}
             </div>
           ))}

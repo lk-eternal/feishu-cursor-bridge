@@ -72,6 +72,7 @@ export default function Settings({ onBack }: Props) {
   const [receiveId, setReceiveId] = useState("")
   const [idType, setIdType] = useState<IdType>("open_id")
   const [workspaceDir, setWorkspaceDir] = useState("")
+  const [enableGroupChat, setEnableGroupChat] = useState(false)
   const [model, setModel] = useState("auto")
   const [showSecret, setShowSecret] = useState(false)
   const [proxy, setProxy] = useState("")
@@ -190,7 +191,8 @@ export default function Settings({ onBack }: Props) {
     window.electronAPI.getConfig().then((config) => {
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
       setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
-      setWorkspaceDir(config.workspaceDir); setModel(config.model)
+      setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
+      setModel(config.model)
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
@@ -210,7 +212,8 @@ export default function Settings({ onBack }: Props) {
     if (tab === "general") window.electronAPI.getConfig().then((config) => {
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
       setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
-      setWorkspaceDir(config.workspaceDir); setModel(config.model)
+      setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
+      setModel(config.model)
       setProxy(config.httpProxy || config.httpsProxy || "")
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
@@ -232,7 +235,8 @@ export default function Settings({ onBack }: Props) {
       const r = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
         larkReceiveId: receiveId.trim(), larkReceiveIdType: idType,
-        workspaceDir: workspaceDir.trim(), model,
+        workspaceDir: workspaceDir.trim(), enableGroupChat,
+        model,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
         closeWindowAction,
@@ -249,7 +253,7 @@ export default function Settings({ onBack }: Props) {
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, idType, workspaceDir, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
+  }, [appId, appSecret, receiveId, idType, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -571,16 +575,28 @@ export default function Settings({ onBack }: Props) {
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-4">
-                  <div><label className="mb-1 block text-xs text-gray-500">Receive ID</label><input type="text" value={receiveId} onChange={(e) => setReceiveId(e.target.value)} className={inputCls} /></div>
+                  <div><label className="mb-1 block text-xs text-gray-500">Receive ID <span className="text-gray-600">(自动填写)</span></label><input type="text" value={receiveId} readOnly tabIndex={-1} className={`${inputCls} cursor-default opacity-70`} /></div>
                   <div><label className="mb-1 block text-xs text-gray-500">ID 类型</label>
                     <select value={idType} onChange={(e) => setIdType(e.target.value as IdType)} className={inputCls}><option value="open_id">Open ID</option><option value="user_id">User ID</option><option value="chat_id">Chat ID</option></select>
                   </div>
                 </div>
               </section>
               <section className="space-y-3">
-                <h3 className="text-sm font-medium text-gray-300">工作目录</h3>
+                <h3 className="text-sm font-medium text-gray-300">私聊工作目录</h3>
                 <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
                   <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
+                </div>
+              </section>
+              <section className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium text-gray-300">允许群聊</h3>
+                    <p className="text-xs text-gray-500">开启后机器人将响应群聊 @消息，工作目录自动创建</p>
+                  </div>
+                  <button onClick={() => setEnableGroupChat(!enableGroupChat)}
+                    className={`relative h-6 w-11 rounded-full transition ${enableGroupChat ? "bg-blue-600" : "bg-gray-600"}`}>
+                    <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition ${enableGroupChat ? "left-[22px]" : "left-0.5"}`} />
+                  </button>
                 </div>
               </section>
               <section className="space-y-3">
