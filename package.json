@@ -1,6 +1,6 @@
 {
   "name": "feishu-cursor-bridge",
-  "version": "2.5.8",
+  "version": "3.0.0",
   "description": "Feishu Cursor Bridge - 飞书 × Cursor 远程协作桌面应用",
   "keywords": [
     "mcp",
@@ -32,8 +32,7 @@
     "dist:mac": "npm run build && electron-builder --mac",
     "pack:win": "npm run build && electron-builder --win --dir",
     "pack:mac": "npm run build && electron-builder --mac --dir",
-    "pack:linux": "npm run build && electron-builder --linux --dir",
-    "publish:npm": "npm run build:mcp && node scripts/publish-npm.cjs"
+    "pack:linux": "npm run build && electron-builder --linux --dir"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.60.0",

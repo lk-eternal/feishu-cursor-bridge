@@ -1,5 +1,23 @@
 [
   {
+    "version": "3.0.0",
+    "date": "2026-04-24",
+    "changes": [
+      "新增: 多 Agent 并行架构 — 群聊/私聊/定时任务各自独立 Session Agent",
+      "新增: 群聊支持 — @机器人 即可在群内与 Agent 对话, 每个群独立会话",
+      "新增: 环境隔离 — 群聊 Agent 使用独立临时工作目录, 互不干扰",
+      "新增: MCP 项目级动态注入 — 每次启动自动写入 .cursor/mcp.json, 端口变化自动更新",
+      "新增: 指令权限分级 — /restart /workspace /mcp 等系统指令仅管理员可用",
+      "新增: 指令会话隔离 — /stop /reset 非管理员仅影响自身会话",
+      "新增: /help 按角色展示 — 管理员看全部指令, 普通用户看基础指令",
+      "新增: Admin MCP Server — 独立管理端点, 支持 Agent/规则/定时任务/MCP 管理",
+      "优化: 代码架构重构 — agent-launcher/agent-cli/workspace-injector/ui-logger 模块拆分",
+      "优化: 移除 Agent 15秒全局冷却, 消息到达即刻响应",
+      "优化: 消息合并投递 — 同一会话短时间内多条消息合并为一次 Agent 调用",
+      "修复: 群聊绑定流程 — 支持群内自动识别主用户身份"
+    ]
+  },
+  {
     "version": "2.5.8",
     "date": "2026-04-21",
     "changes": [
