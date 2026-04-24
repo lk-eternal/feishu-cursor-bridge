@@ -24,7 +24,7 @@ import {
   checkAgentLoggedIn as _checkAgentLoggedIn, loginCli as _loginCli,
   reapIdleGroupAgents as _reapIdleGroupAgents,
   getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
-  P2P_SESSION_KEY, setMainChatId, resetAgentCooldown,
+  P2P_SESSION_KEY, setMainChatId,
   setChatNameResolver as _setChatNameResolver,
 } from "./agent-launcher"
 
@@ -881,7 +881,7 @@ export function getSessionAgentList() {
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
 
-interface FileCommand { id: string; command: string; messageId: string }
+interface FileCommand { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
 
 async function reportCommandResult(port: number, messageId: string, ok: boolean, message: string): Promise<void> {
   try {
@@ -1515,25 +1515,35 @@ async function checkAndExecutePendingCommands(): Promise<void> {
   if (!cmds || cmds.length === 0) return
 
   for (const cmd of cmds) {
-    let claimed: { command: string; messageId: string } | null
+    let claimed: { command: string; messageId: string; chatId?: string; chatType?: string } | null
     try {
-      const claimRes = await httpPost(`http://127.0.0.1:${lock.port}/commands/claim`, { id: cmd.id }) as { ok: boolean; command?: string; messageId?: string }
+      const claimRes = await httpPost(`http://127.0.0.1:${lock.port}/commands/claim`, { id: cmd.id }) as
+        { ok: boolean; command?: string; messageId?: string; chatId?: string; chatType?: string }
       if (!claimRes.ok) continue
-      claimed = { command: claimRes.command!, messageId: claimRes.messageId! }
+      claimed = { command: claimRes.command!, messageId: claimRes.messageId!, chatId: claimRes.chatId, chatType: claimRes.chatType }
     } catch { continue }
 
     const rawCmd = claimed.command.trim()
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
+    const isAdmin = isMainUser(undefined, claimed.chatId, claimed.chatType)
+    const reply = (ok: boolean, msg: string) => reportCommandResult(lock.port, claimed!.messageId, ok, msg)
+    const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
 
-    broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId})`)
+    broadcastLog(`[指令] 执行 ${rawCmd} (msgId=${claimed.messageId} admin=${isAdmin})`)
     try {
       switch (head) {
         case "/stop": {
-          const wasRunning = _isAgentRunning()
-          stopAgent()
-          await reportCommandResult(lock.port, claimed.messageId, true,
-            wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
+          if (isAdmin) {
+            const wasRunning = _isAgentRunning()
+            stopAgent()
+            await reply(true, wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
+          } else if (claimed.chatId && _isSessionAgentRunning(claimed.chatId)) {
+            _stopSessionAgent(claimed.chatId)
+            await reply(true, "✅ 当前会话 Agent 已停止")
+          } else {
+            await reply(false, "❌ 当前会话无运行中的 Agent")
+          }
           break
         }
 
@@ -1550,42 +1560,45 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             `📭 队列消息: ${status.queueLength ?? 0} 条`,
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean)
-          await reportCommandResult(lock.port, claimed.messageId, true, lines.join("\n"))
+          await reply(true, lines.join("\n"))
           break
         }
 
         case "/list": {
           const msgs = await getQueueMessages()
-          if (msgs.length === 0) {
-            await reportCommandResult(lock.port, claimed.messageId, true, "📭 消息队列为空")
+          const filtered = isAdmin ? msgs : msgs.filter((m) => m.chatId === claimed!.chatId)
+          if (filtered.length === 0) {
+            await reply(true, "📭 消息队列为空")
           } else {
-            const lines = msgs.map((m) => `  [${m.index}] ${m.preview}`)
-            await reportCommandResult(lock.port, claimed.messageId, true,
-              `📬 队列中有 ${msgs.length} 条消息：\n${lines.join("\n")}`)
+            const lines = filtered.map((m) => `  [${m.index}] ${m.preview}`)
+            await reply(true, `📬 队列中有 ${filtered.length} 条消息：\n${lines.join("\n")}`)
           }
           break
         }
 
         case "/task": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuTaskCommand(lock.port, claimed.messageId, rawCmd)
           break
         }
 
         case "/model": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd)
           break
         }
 
         case "/mcp": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuMcpCommand(lock.port, claimed.messageId, rawCmd)
           break
         }
 
         case "/restart": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           stopAgent()
           const cleared = await clearMessageQueue()
-          await reportCommandResult(lock.port, claimed.messageId, true,
-            `✅ Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
+          await reply(true, `✅ Agent 已停止，已清空 ${cleared} 条队列消息，正在重启 Daemon...`)
           await stopDaemon()
           await new Promise((r) => setTimeout(r, 1500))
           const result = await startDaemon()
@@ -1594,81 +1607,84 @@ async function checkAndExecutePendingCommands(): Promise<void> {
         }
 
         case "/clean": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           const cleared = await clearMessageQueue()
           broadcastLog(`[指令 /clean] 已清空队列 ${cleared} 条`, "INFO")
-          await reportCommandResult(lock.port, claimed.messageId, true,
-            `✅ 已清空消息队列，共移除 ${cleared} 条`)
+          await reply(true, `✅ 已清空消息队列，共移除 ${cleared} 条`)
           break
         }
 
         case "/reset": {
-          stopAgent()
-          resetAgentCooldown()
-          setMainChatId(getConfig().workspaceDir, "")
-          broadcastLog("[指令 /reset] 已清除主会话并停止 Agent，下次启动将创建新会话", "INFO")
-          await reportCommandResult(
-            lock.port,
-            claimed.messageId,
-            true,
-            "✅ 已停止并重置当前会话, 请重新发消息开启新会话",
-          )
+          if (isAdmin) {
+            stopAgent()
+            setMainChatId(getConfig().workspaceDir, "")
+            broadcastLog("[指令 /reset] 已清除主会话并停止 Agent，下次启动将创建新会话", "INFO")
+            await reply(true, "✅ 已停止并重置当前会话, 请重新发消息开启新会话")
+          } else if (claimed.chatId && _isSessionAgentRunning(claimed.chatId)) {
+            _stopSessionAgent(claimed.chatId)
+            await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
+          } else {
+            await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
+          }
           break
         }
 
         case "/workspace": {
+          if (!isAdmin) { await denyNonAdmin(); break }
           const wsArgs = cmdTokens.slice(1)
           if (wsArgs.length === 0 || wsArgs[0] === "info") {
             const cfg = getConfig()
-            await reportCommandResult(lock.port, claimed.messageId, true,
-              `📂 当前工作目录: ${cfg.workspaceDir || "(未配置)"}`)
+            await reply(true, `📂 当前工作目录: ${cfg.workspaceDir || "(未配置)"}`)
           } else if (wsArgs[0] === "set" && wsArgs.length >= 2) {
             const newDir = wsArgs.slice(1).join(" ").trim()
             const cfg = getConfig()
             if (newDir === cfg.workspaceDir) {
-              await reportCommandResult(lock.port, claimed.messageId, true, `📂 工作目录未变化: ${newDir}`)
+              await reply(true, `📂 工作目录未变化: ${newDir}`)
             } else {
-              await reportCommandResult(lock.port, claimed.messageId, true,
-                `📂 正在切换工作目录到: ${newDir}\n⏳ 需要重启 Daemon 生效...`)
+              await reply(true, `📂 正在切换工作目录到: ${newDir}\n⏳ 需要重启 Daemon 生效...`)
               stopAgent()
-              const result = await applyWorkspaceDirRestart(newDir)
-              if (result.ok) {
+              const wsResult = await applyWorkspaceDirRestart(newDir)
+              if (wsResult.ok) {
                 broadcastLog(`[指令 /workspace] 已切换到 ${newDir} 并重启 Daemon`, "INFO")
               } else {
-                broadcastLog(`[指令 /workspace] 切换失败: ${result.error}`, "ERROR")
+                broadcastLog(`[指令 /workspace] 切换失败: ${wsResult.error}`, "ERROR")
               }
             }
           } else {
-            await reportCommandResult(lock.port, claimed.messageId, false,
-              "用法：/workspace 查看当前 | /workspace set <路径>")
+            await reply(false, "用法：/workspace 查看当前 | /workspace set <路径>")
           }
           break
         }
 
         case "/help": {
-          const helpLines = [
-            "💡 可用指令：",
+          const common = [
             "🔹 /status 运行状态",
-            "🔹 /restart 重启应用",
             "🔹 /stop 停止Agent",
             "🔹 /reset 重置会话",
+            "🔹 /help 指令列表",
+          ]
+          const adminOnly = [
+            "🔹 /restart 重启应用",
             "🔹 /list 消息队列",
             "🔹 /clean 清空队列",
             "🔹 /task 定时任务",
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",
-            "🔹 /help 指令列表",
           ]
-          await reportCommandResult(lock.port, claimed.messageId, true, helpLines.join("\n"))
+          const lines = isAdmin
+            ? ["💡 可用指令（管理员）：", ...common, ...adminOnly]
+            : ["💡 可用指令：", ...common]
+          await reply(true, lines.join("\n"))
           break
         }
 
         default:
-          await reportCommandResult(lock.port, claimed.messageId, false, `😅 未知指令: ${head}`)
+          await reply(false, `😅 未知指令: ${head}`)
       }
     } catch (e: unknown) {
       broadcastLog(`[指令] ${rawCmd} 执行异常: ${e instanceof Error ? e.message : e}`, "ERROR")
-      try { await reportCommandResult(lock.port, claimed.messageId, false, `❌ 执行异常: ${e instanceof Error ? e.message : e}`) } catch { /* ignore */ }
+      try { await reply(false, `❌ 执行异常: ${e instanceof Error ? e.message : e}`) } catch { /* ignore */ }
     }
   }
 }

@@ -168,7 +168,7 @@ function startLarkConnection(): void {
     log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}: ${cleanText.slice(0, 100)}`);
 
     if (messageType === "text" && isCommand(cleanText)) {
-      handleCommand(cleanText, messageId).catch((e: any) =>
+      handleCommand(cleanText, messageId, chatId, chatType).catch((e: any) =>
         log("ERROR", `指令处理失败: ${e?.message ?? e}`),
       );
       return;
@@ -219,7 +219,7 @@ async function replyToMessage(messageId: string, text: string): Promise<void> {
 
 // ── 共享指令文件队列（.fcmd）──────────────────────────────
 
-function pushCommandToQueue(command: string, messageId: string, source: string): boolean {
+function pushCommandToQueue(command: string, messageId: string, source: string, chatId?: string, chatType?: string): boolean {
   const queueDir = getQueueDir();
   if (!queueDir) return false;
   const ts = Date.now();
@@ -231,7 +231,7 @@ function pushCommandToQueue(command: string, messageId: string, source: string):
   } catch { /* ignore */ }
 
   try {
-    const data = JSON.stringify({ command, messageId, timestamp: ts, source });
+    const data = JSON.stringify({ command, messageId, timestamp: ts, source, chatId, chatType });
     const filename = `${ts}_${safeId}.fcmd`;
     const tmpPath = path.join(queueDir, filename + ".tmp");
     const finalPath = path.join(queueDir, filename);
@@ -242,7 +242,9 @@ function pushCommandToQueue(command: string, messageId: string, source: string):
   } catch { return false; }
 }
 
-function getPendingCommands(): { id: string; command: string; messageId: string }[] {
+interface CmdEntry { id: string; command: string; messageId: string; chatId?: string; chatType?: string }
+
+function getPendingCommands(): CmdEntry[] {
   const queueDir = getQueueDir();
   if (!queueDir) return [];
   try {
@@ -250,14 +252,14 @@ function getPendingCommands(): { id: string; command: string; messageId: string 
     return files.map((f) => {
       try {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
-        const parsed = JSON.parse(raw);
-        return { id: f, command: parsed.command, messageId: parsed.messageId };
+        const p = JSON.parse(raw);
+        return { id: f, command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType };
       } catch { return null; }
-    }).filter(Boolean) as { id: string; command: string; messageId: string }[];
+    }).filter(Boolean) as CmdEntry[];
   } catch { return []; }
 }
 
-function claimCommand(fileId: string): { command: string; messageId: string } | null {
+function claimCommand(fileId: string): Omit<CmdEntry, "id"> | null {
   const queueDir = getQueueDir();
   if (!queueDir) return null;
   const srcPath = path.join(queueDir, fileId);
@@ -266,8 +268,8 @@ function claimCommand(fileId: string): { command: string; messageId: string } | 
     fs.renameSync(srcPath, claimedPath);
     const raw = fs.readFileSync(claimedPath, "utf-8");
     fs.unlinkSync(claimedPath);
-    const parsed = JSON.parse(raw);
-    return { command: parsed.command, messageId: parsed.messageId };
+    const p = JSON.parse(raw);
+    return { command: p.command, messageId: p.messageId, chatId: p.chatId, chatType: p.chatType };
   } catch { return null; }
 }
 
@@ -311,9 +313,9 @@ function cleanCommandMessagesFromQueue(): void {
   } catch { /* ignore */ }
 }
 
-async function handleCommand(text: string, messageId: string): Promise<void> {
+async function handleCommand(text: string, messageId: string, chatId?: string, chatType?: string): Promise<void> {
   const trimmed = text.trim();
-  pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`);
+  pushCommandToQueue(trimmed, messageId, `daemon-${process.pid}`, chatId, chatType);
   setTimeout(() => cleanCommandMessagesFromQueue(), 2000);
 }
 

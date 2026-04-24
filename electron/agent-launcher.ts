@@ -16,14 +16,7 @@ import {
 
 export const P2P_SESSION_KEY = "__p2p__"
 const GROUP_IDLE_TIMEOUT_MS = 30 * 60 * 1000
-const AGENT_COOLDOWN_MS = 15_000
 const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
-
-let lastAgentLaunchTime = 0
-
-export function resetAgentCooldown(): void {
-  lastAgentLaunchTime = 0
-}
 
 // ── 会话 Agent ──────────────────────────────────────────
 
@@ -234,10 +227,6 @@ export function launchSessionAgent(
     sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
     return { ok: true }
   }
-
-  const now = Date.now()
-  if (now - lastAgentLaunchTime < AGENT_COOLDOWN_MS) return { ok: false, error: "冷却中" }
-  lastAgentLaunchTime = now
 
   const config = getConfig()
   let workDir = config.workspaceDir
