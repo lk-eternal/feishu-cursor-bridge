@@ -93,12 +93,12 @@ function initFileQueue(): void {
   cleanupStaleMessages();
 }
 
-function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string): void {
+function pushMessage(content: string, messageId?: string, chatId?: string, chatType?: string, senderOpenId?: string): void {
   if (!content?.trim()) {
     log("WARN", `丢弃空消息 (messageId=${messageId})`);
     return;
   }
-  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, chatId, chatType);
+  const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, chatId, chatType, senderOpenId);
   if (written) {
     log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"})`);
   } else {
@@ -117,6 +117,24 @@ function clearFileQueue(): number {
     log("INFO", `队列已清空: ${files.length} 条消息`);
     return files.length;
   } catch { return 0; }
+}
+
+// ── 主用户绑定 ─────────────────────────────────────────────
+
+let bindWaiting = false;
+
+function startBind(): void {
+  bindWaiting = true;
+  log("INFO", "进入主用户绑定等待状态");
+}
+
+function tryCaptureBind(chatType: string, chatId: string, senderOpenId?: string): boolean {
+  if (!bindWaiting || chatType !== "p2p") return false;
+  bindWaiting = false;
+  const payload = JSON.stringify({ openId: senderOpenId ?? "", chatId });
+  process.stdout.write(`__BIND_RESULT__:${payload}\n`);
+  log("INFO", `主用户绑定完成: openId=${senderOpenId}, chatId=${chatId}`);
+  return true;
 }
 
 // ── 飞书 WebSocket 长连接 ────────────────────────────────
@@ -144,6 +162,8 @@ function startLarkConnection(): void {
       return;
     }
 
+    if (tryCaptureBind(chatType, chatId, senderOpenId)) return;
+
     const cleanText = chatType === "group" ? stripMentionTags(text) : text;
     log("INFO", `收到消息 [${chatType}] chat=${chatId} sender=${senderOpenId ?? "?"}: ${cleanText.slice(0, 100)}`);
 
@@ -156,10 +176,10 @@ function startLarkConnection(): void {
 
     if (messageType === "image" || messageType === "post") {
       sender.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => pushMessage(result, messageId, chatId, chatType))
-        .catch(() => pushMessage(cleanText, messageId, chatId, chatType));
+        .then((result) => pushMessage(result, messageId, chatId, chatType, senderOpenId))
+        .catch(() => pushMessage(cleanText, messageId, chatId, chatType, senderOpenId));
     } else {
-      pushMessage(cleanText, messageId, chatId, chatType);
+      pushMessage(cleanText, messageId, chatId, chatType, senderOpenId);
     }
   });
 }
@@ -376,6 +396,25 @@ function startHttpServer(): Promise<number> {
           return;
         }
 
+        if (method === "POST" && pathname === "/start-bind") {
+          startBind();
+          json(res, { ok: true });
+          return;
+        }
+
+        if (method === "POST" && pathname === "/test-bind") {
+          const body = JSON.parse(await readBody(req));
+          const chatId = typeof body.chatId === "string" ? body.chatId : "";
+          if (!chatId) { json(res, { error: "chatId is required" }, 400); return; }
+          try {
+            await sender.sendMessageToChat(chatId, "🔗 绑定测试成功！连接正常。");
+            json(res, { ok: true });
+          } catch (e: any) {
+            json(res, { ok: false, error: e?.message ?? "发送失败" }, 500);
+          }
+          return;
+        }
+
         if (method === "POST" && pathname === "/enqueue") {
           const body = JSON.parse(await readBody(req));
           const content = typeof body.content === "string" ? body.content : "";
@@ -399,7 +438,7 @@ function startHttpServer(): Promise<number> {
         if (method === "POST" && pathname === "/dequeue-all") {
           const body = await readBody(req).catch(() => "{}");
           const { chatId: filterChat } = JSON.parse(body || "{}") as { chatId?: string };
-          const messages: { text: string; chatId: string; chatType: string }[] = [];
+          const messages: { text: string; messageId: string; chatId: string; chatType: string; senderOpenId: string }[] = [];
           let m: ReturnType<typeof claimNextMessage>;
           while ((m = claimNextMessage(filterChat)) !== null) messages.push(m);
           json(res, { ok: true, messages, queueLength: getFileQueueLength() });

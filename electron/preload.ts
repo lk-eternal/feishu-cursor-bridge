@@ -215,6 +215,13 @@ const api = {
     ipcRenderer.on("mcp:login-complete", handler)
     return () => ipcRenderer.removeListener("mcp:login-complete", handler)
   },
+  startBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:start"),
+  testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),
+  onBindResult: (cb: (data: { ok: boolean; value: string }) => void) => {
+    const handler = (_: unknown, data: { ok: boolean; value: string }) => cb(data)
+    ipcRenderer.on("bind:result", handler)
+    return () => ipcRenderer.removeListener("bind:result", handler)
+  },
   onDaemonStatus: (cb: (status: DaemonStatus) => void) => {
     const handler = (_: unknown, status: DaemonStatus) => cb(status)
     ipcRenderer.on("daemon:status-update", handler)

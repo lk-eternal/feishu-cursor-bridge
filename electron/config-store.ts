@@ -22,11 +22,6 @@ export interface AppConfig {
   httpsProxy: string
   noProxy: string
   agentNewSession: boolean
-  /**
-   * 由 /reset 设置：下一次成功拉起 Agent 时不带 --continue（新开 CLI 会话），启动成功后自动清除。
-   * 不出现在设置 UI，仅本地 store。
-   */
-  agentSkipContinueNextLaunch: boolean
   /** 点关闭主窗口时：ask=弹窗选择；minimize=隐藏到托盘；quit=直接退出应用 */
   closeWindowAction: "ask" | "minimize" | "quit"
   scheduledTasks: ScheduledTask[]
@@ -49,7 +44,6 @@ const defaults: AppConfig = {
   httpsProxy: "",
   noProxy: "localhost,127.0.0.1,feishu.cn",
   agentNewSession: false,
-  agentSkipContinueNextLaunch: false,
   closeWindowAction: "ask",
   scheduledTasks: [],
   verifiedMcpServers: [],

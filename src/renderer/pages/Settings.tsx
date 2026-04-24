@@ -80,6 +80,24 @@ export default function Settings({ onBack }: Props) {
   const [agentNewSession, setAgentNewSession] = useState(false)
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
+  const [bindWaiting, setBindWaiting] = useState(false)
+
+  const handleBind = async () => {
+    if (!appId.trim() || !appSecret.trim()) {
+      alert("请先填写飞书 App ID 和 App Secret")
+      return
+    }
+    const status = await window.electronAPI.getDaemonStatus()
+    if (!status.running) {
+      if (!confirm("绑定需要先启动 Daemon 长连接，是否立即启动？")) return
+      const r = await window.electronAPI.startDaemon()
+      if (!r.ok) { alert(`Daemon 启动失败：${r.error || "未知错误"}`); return }
+      await new Promise((r) => setTimeout(r, 2000))
+    }
+    setBindWaiting(true)
+    const r = await window.electronAPI.startBind()
+    if (!r.ok) { setBindWaiting(false); alert(r.error || "绑定启动失败") }
+  }
 
   const [appVersion, setAppVersion] = useState("")
   const [updateBusy, setUpdateBusy] = useState(false)
@@ -163,6 +181,14 @@ export default function Settings({ onBack }: Props) {
   }, [])
 
   useEffect(() => {
+    const off = window.electronAPI.onBindResult((data) => {
+      setBindWaiting(false)
+      if (data.ok && data.value) setReceiveId(data.value)
+    })
+    return off
+  }, [])
+
+  useEffect(() => {
     const offS = window.electronAPI.onUpdaterStatus((s) => {
       if (s.kind === "downloading") {
         setUpdateDownloadPct(0)
@@ -234,7 +260,7 @@ export default function Settings({ onBack }: Props) {
     saveTimer.current = setTimeout(async () => {
       const r = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
-        larkReceiveId: receiveId.trim(), larkReceiveIdType: idType,
+        larkReceiveId: receiveId.trim(), larkReceiveIdType: "chat_id" as const,
         workspaceDir: workspaceDir.trim(), enableGroupChat,
         model,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
@@ -253,7 +279,7 @@ export default function Settings({ onBack }: Props) {
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, idType, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -574,17 +600,41 @@ export default function Settings({ onBack }: Props) {
                     </div>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div><label className="mb-1 block text-xs text-gray-500">Receive ID <span className="text-gray-600">(自动填写)</span></label><input type="text" value={receiveId} readOnly tabIndex={-1} className={`${inputCls} cursor-default opacity-70`} /></div>
-                  <div><label className="mb-1 block text-xs text-gray-500">ID 类型</label>
-                    <select value={idType} onChange={(e) => setIdType(e.target.value as IdType)} className={inputCls}><option value="open_id">Open ID</option><option value="user_id">User ID</option><option value="chat_id">Chat ID</option></select>
-                  </div>
-                </div>
               </section>
-              <section className="space-y-3">
-                <h3 className="text-sm font-medium text-gray-300">私聊工作目录</h3>
-                <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
-                  <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
+              <section className="space-y-4">
+                <div>
+                  <h3 className="text-sm font-medium text-gray-300">主用户</h3>
+                  <p className="mt-0.5 text-xs text-gray-600">绑定宿主用户，用于定时任务回复和主工作目录识别</p>
+                </div>
+                <div className="flex items-center gap-3 rounded-lg border border-gray-700 px-4 py-3">
+                  {receiveId
+                    ? <>
+                        <CheckCircle2 size={16} className="text-green-400" />
+                        <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
+                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
+                          {bindWaiting ? <Loader2 size={13} className="inline animate-spin" /> : "重新绑定"}
+                        </button>
+                        <span className="text-gray-700">|</span>
+                        <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
+                        <span className="text-gray-700">|</span>
+                        <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) alert(r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                      </>
+                    : <>
+                        <ShieldAlert size={16} className="text-yellow-500" />
+                        <span className="flex-1 text-sm text-gray-500">{bindWaiting ? "请在飞书私聊中发送一条消息..." : "未绑定"}</span>
+                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1.5 rounded-md border border-gray-600 px-3 py-1.5 text-xs text-gray-300 transition hover:border-blue-500 hover:text-blue-400 disabled:opacity-50">
+                          {bindWaiting ? <Loader2 size={13} className="animate-spin" /> : null}
+                          绑定
+                        </button>
+                      </>
+                  }
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">主工作目录</label>
+                  <div onClick={selectDir} className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-700 px-4 py-3 transition hover:border-blue-500">
+                    <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
                 </div>
               </section>
               <section className="space-y-3">

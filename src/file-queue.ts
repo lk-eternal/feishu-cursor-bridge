@@ -18,7 +18,7 @@ export function getQueueDir(): string {
   return queueDir;
 }
 
-export function pushToFileQueue(text: string, messageId?: string, source?: string, chatId?: string, chatType?: string): boolean {
+export function pushToFileQueue(text: string, messageId?: string, source?: string, chatId?: string, chatType?: string, senderOpenId?: string): boolean {
   if (!queueDir || !text?.trim()) return false;
 
   const ts = Date.now();
@@ -40,6 +40,7 @@ export function pushToFileQueue(text: string, messageId?: string, source?: strin
       text, messageId: id, timestamp: ts,
       source: source || `pid-${process.pid}`,
       chatId: chatId || "", chatType: chatType || "",
+      senderOpenId: senderOpenId || "",
     });
     const tmpPath = path.join(queueDir, filename + ".tmp");
     const finalPath = path.join(queueDir, filename);
@@ -56,6 +57,7 @@ export interface QueueMessage {
   messageId: string;
   chatId: string;
   chatType: string;
+  senderOpenId: string;
 }
 
 export function claimNextMessage(filterChatId?: string): QueueMessage | null {
@@ -94,6 +96,7 @@ export function claimNextMessage(filterChatId?: string): QueueMessage | null {
         messageId: parsed.messageId || "",
         chatId: parsed.chatId || "",
         chatType: parsed.chatType || "",
+        senderOpenId: parsed.senderOpenId || "",
       };
     } catch {
       try { fs.unlinkSync(claimedPath); } catch { /* ignore */ }
@@ -133,7 +136,7 @@ export async function pollFileQueueBatch(timeoutMs: number, intervalMs = POLL_IN
     parts.push(extra.text);
     extra = claimNextMessage(filterChatId);
   }
-  return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType };
+  return { text: parts.join("\n"), messageId: first.messageId, chatId: first.chatId, chatType: first.chatType, senderOpenId: first.senderOpenId };
 }
 
 export function pollFileQueueBatchText(timeoutMs: number, intervalMs = POLL_INTERVAL_MS, filterChatId?: string): Promise<string | null> {
