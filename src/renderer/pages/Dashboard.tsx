@@ -38,7 +38,7 @@ export default function Dashboard({ onSettings }: Props) {
   const [clearingQueue, setClearingQueue] = useState(false)
   const [configModel, setConfigModel] = useState("")
   const [showSessions, setShowSessions] = useState(false)
-  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]>([])
+  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]>([])
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
@@ -400,7 +400,7 @@ export default function Dashboard({ onSettings }: Props) {
                 <div className="flex items-center gap-2 overflow-hidden">
                   <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : "bg-blue-400"}`} />
                   <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
-                    {s.chatType === "group" ? "群聊" : "私聊"} {s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey}
+                    {s.chatType === "group" ? "群聊" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
                   </span>
                   <span className="text-xs text-gray-600">PID:{s.pid}</span>
                 </div>

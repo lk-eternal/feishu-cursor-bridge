@@ -739,6 +739,22 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
   }
 
+  // ── Chat 名称查询 ──
+  if (pathname === "/api/chat-names" && method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const chatIds = Array.isArray(body.chatIds) ? body.chatIds as string[] : [];
+    const names: Record<string, string> = {};
+    for (const cid of chatIds) {
+      try {
+        const r: any = await larkClient.im.chat.get({ path: { chat_id: cid } });
+        const name = r?.data?.name || r?.data?.chat?.name;
+        if (name) names[cid] = name;
+      } catch { /* ignore */ }
+    }
+    json(res, { ok: true, names });
+    return true;
+  }
+
   // ── Workspace 管理 ──
   if (pathname === "/api/workspace") {
     if (method === "GET") {

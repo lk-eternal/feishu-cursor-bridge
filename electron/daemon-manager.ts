@@ -15,7 +15,7 @@ import {
   type ExecAgentOptions,
 } from "./agent-cli"
 import {
-  launchAgent as _launchAgent, stopAgent as _stopAgent,
+  stopAgent as _stopAgent,
   launchSessionAgent as _launchSessionAgent, stopSessionAgent as _stopSessionAgent,
   stopAllSessionAgents as _stopAllSessionAgents, getSessionAgentList as _getSessionAgentList,
   launchIndependentAgent as _launchIndependentAgent, isAgentRunning as _isAgentRunning,
@@ -25,6 +25,7 @@ import {
   reapIdleGroupAgents as _reapIdleGroupAgents,
   getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
   P2P_SESSION_KEY, setMainChatId, resetAgentCooldown,
+  setChatNameResolver as _setChatNameResolver,
 } from "./agent-launcher"
 
 /** 与 daemon stderr 当前格式一致：`时间戳 [LarkDaemon] 等级 内容` */
@@ -91,6 +92,24 @@ function getDaemonEntryPath(): string {
   const bundled = path.join(app.getAppPath(), "dist-bundle", "daemon-entry.mjs")
   if (fs.existsSync(bundled)) return bundled
   return path.join(app.getAppPath(), "dist", "daemon-entry.js")
+}
+
+function getMcpServerPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "daemon", "mcp-server.mjs")
+  }
+  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-server.mjs")
+  if (fs.existsSync(bundled)) return bundled
+  return path.join(app.getAppPath(), "dist", "index.js")
+}
+
+function getAdminMcpPath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, "daemon", "mcp-admin.mjs")
+  }
+  const bundled = path.join(app.getAppPath(), "dist-bundle", "mcp-admin.mjs")
+  if (fs.existsSync(bundled)) return bundled
+  return path.join(app.getAppPath(), "dist", "server-admin-entry.js")
 }
 
 function getLockFilePath(): string {
@@ -473,6 +492,12 @@ function startStatusPolling(): void {
 
       _reapIdleGroupAgents()
 
+      const sessions = _getSessionAgentList()
+      const uncachedGroups = sessions
+        .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
+        .map((s) => s.sessionKey)
+      if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
+
       if (status.running) {
         await checkAndExecutePendingCommands()
       }
@@ -488,6 +513,27 @@ function stopStatusPolling(): void {
     statusInterval = null
   }
   stopDaemonPowerSaveBlock()
+}
+
+// ── Chat 名称缓存 ──────────────────────────────────────────
+
+const chatNameCache = new Map<string, string>()
+
+async function fetchChatNames(chatIds: string[]): Promise<void> {
+  const missing = chatIds.filter((id) => id && !chatNameCache.has(id))
+  if (missing.length === 0) return
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/chat-names`, { chatIds: missing }, 15_000)) as { names?: Record<string, string> }
+    if (res?.names) {
+      for (const [id, name] of Object.entries(res.names)) chatNameCache.set(id, name)
+    }
+  } catch { /* ignore */ }
+}
+
+export function getChatName(chatId: string): string | undefined {
+  return chatNameCache.get(chatId)
 }
 
 interface DequeuedMessage { text: string; messageId: string; chatId: string; chatType: string; senderOpenId?: string }
@@ -546,8 +592,12 @@ function isMainUser(_senderOpenId?: string, chatId?: string, chatType?: string):
 }
 
 async function dispatchSessionAgents(): Promise<void> {
-  injectMcpToGlobal()
+  const config = getConfig()
+  if (config.workspaceDir) injectMcpToDir(config.workspaceDir, true)
   const chats = await getQueueChats()
+
+  const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
+  if (groupChatIds.length > 0) await fetchChatNames(groupChatIds)
 
   for (const { chatId, chatType } of chats) {
     if (_isSessionAgentRunning(chatId)) continue
@@ -559,7 +609,10 @@ async function dispatchSessionAgents(): Promise<void> {
     const mainUser = isMainUser(bundled.senderOpenId, chatId, chatType)
     const useMainWorkspace = mainUser && chatType === "p2p"
 
-    const label = chatType === "group" ? `群聊 ${chatId}` : (mainUser ? "主用户私聊" : `私聊 ${chatId}`)
+    const chatName = chatNameCache.get(chatId)
+    const label = chatType === "group"
+      ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
+      : (mainUser ? "主用户私聊" : `私聊 ${chatId}`)
     broadcastLog(`[Agent] ${label} 有 ${bundled.count} 条消息，自动拉起${useMainWorkspace ? "(主工作目录)" : ""}`)
 
     const result = launchSessionAgent(chatId, chatType as "p2p" | "group", bundled.text, meta, useMainWorkspace)
@@ -627,45 +680,51 @@ export const getLogBuffer = _getLogBuffer
  * 按优先级检查全局和项目 mcp.json 中是否已存在指定 serverKey。
  * 存在则返回该文件路径（原地更新），都不存在返回 null（将注入项目目录）。
  */
-let lastInjectedMcpHash = ""
+const injectedMcpHashes = new Map<string, string>()
 
-function injectMcpToGlobal(): boolean {
+function buildMcpServers(includeAdmin: boolean): Record<string, unknown> {
   const config = getConfig()
+  const env: Record<string, string> = {
+    LARK_APP_ID: config.larkAppId || "",
+    LARK_APP_SECRET: config.larkAppSecret || "",
+    LARK_RECEIVE_ID: config.larkReceiveId || "",
+    LARK_RECEIVE_ID_TYPE: config.larkReceiveIdType || "",
+  }
+  if (cachedPort) env.LARK_DAEMON_PORT = String(cachedPort)
+
+  const servers: Record<string, unknown> = {
+    "feishu-cursor-bridge": { command: "node", args: [getMcpServerPath()], env },
+  }
+  if (includeAdmin && cachedPort) {
+    servers["feishu-cursor-bridge-admin"] = {
+      command: "node",
+      args: [getAdminMcpPath()],
+      env: { LARK_DAEMON_PORT: String(cachedPort) },
+    }
+  }
+  return servers
+}
+
+function injectMcpToDir(wsDir: string, includeAdmin = false): boolean {
   try {
-    const globalMcpJsonPath = path.join(os.homedir(), ".cursor", "mcp.json")
-    const env: Record<string, string> = {
-      LARK_APP_ID: config.larkAppId || "",
-      LARK_APP_SECRET: config.larkAppSecret || "",
-      LARK_RECEIVE_ID: config.larkReceiveId || "",
-      LARK_RECEIVE_ID_TYPE: config.larkReceiveIdType || "",
-    }
-    if (cachedPort) env.LARK_DAEMON_PORT = String(cachedPort)
+    const newServers = buildMcpServers(includeAdmin)
+    const hash = JSON.stringify(newServers)
+    if (injectedMcpHashes.get(wsDir) === hash) return true
 
-    const serverEntry = { command: "npx", args: ["-y", "lark-bridge-mcp@latest"], env }
-    const serverKey = "feishu-cursor-bridge"
-    const entryJson = JSON.stringify(serverEntry)
-
-    if (lastInjectedMcpHash === entryJson) return true
-
+    const mcpPath = path.join(wsDir, ".cursor", "mcp.json")
     let mcpConfig: Record<string, unknown> = {}
-    if (fs.existsSync(globalMcpJsonPath)) {
-      try { mcpConfig = JSON.parse(fs.readFileSync(globalMcpJsonPath, "utf-8")) } catch { mcpConfig = {} }
+    if (fs.existsSync(mcpPath)) {
+      try { mcpConfig = JSON.parse(fs.readFileSync(mcpPath, "utf-8")) } catch { mcpConfig = {} }
     }
-    const servers = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
+    const existing = (mcpConfig.mcpServers ?? {}) as Record<string, unknown>
+    Object.assign(existing, newServers)
+    mcpConfig.mcpServers = existing
 
-    if (JSON.stringify(servers[serverKey]) === entryJson) {
-      lastInjectedMcpHash = entryJson
-      return true
-    }
-
-    servers[serverKey] = serverEntry
-    mcpConfig.mcpServers = servers
-
-    const globalDir = path.dirname(globalMcpJsonPath)
-    if (!fs.existsSync(globalDir)) fs.mkdirSync(globalDir, { recursive: true })
-    fs.writeFileSync(globalMcpJsonPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
-    lastInjectedMcpHash = entryJson
-    broadcastLog(`MCP 配置已更新: ${globalMcpJsonPath}`)
+    const dir = path.dirname(mcpPath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
+    injectedMcpHashes.set(wsDir, hash)
+    broadcastLog(`MCP 已注入: ${mcpPath}`)
     return true
   } catch (e: unknown) {
     broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
@@ -729,9 +788,15 @@ function injectRulesToDir(wsDir: string): boolean {
       "- 可直接发送（不传 `message_id` 和 `chat_id`），消息会发到默认私聊对象",
       "- 也可传入 `message_id` 以回复模式发送（推荐，增强上下文关联）",
       "",
+      "### 等待回复时的 chat_id 过滤 [极其重要]",
+      "- 调用 `sync_message(timeout_seconds=...)` 等待用户回复时，**必须同时传入 `chat_id` 参数**",
+      "- 这是因为多个 Agent（群聊/私聊）共享同一个消息队列，不传 `chat_id` 会导致消费到其他会话的消息（\"串台\"）",
+      "- 如果你的 prompt 中标注了 `chat_id=oc_xxx`，则每次等待时都必须传入该值",
+      "",
       "### 示例",
-      "- 群聊回复：`sync_message(message=\"处理完成\", message_id=\"om_xxxxxx\")`",
-      "- 群聊发送+等待：`sync_message(message=\"请确认\", message_id=\"om_xxxxxx\", timeout_seconds=60)`",
+      "- 群聊回复：`sync_message(message=\"处理完成\", message_id=\"om_xxxxxx\", chat_id=\"oc_yyyyyy\")`",
+      "- 群聊等待：`sync_message(timeout_seconds=60, chat_id=\"oc_yyyyyy\")`",
+      "- 群聊发送+等待：`sync_message(message=\"请确认\", message_id=\"om_xxxxxx\", chat_id=\"oc_yyyyyy\", timeout_seconds=60)`",
       "- 私聊回复：`sync_message(message=\"处理完成\")` 或 `sync_message(message=\"处理完成\", message_id=\"om_xxxxxx\")`",
       "",
       "## ⚠️ 核心禁令 (Hard Constraints)",
@@ -747,6 +812,23 @@ function injectRulesToDir(wsDir: string): boolean {
     ].join("\r\n")
     fs.writeFileSync(rulePath, ruleContent, "utf-8")
     broadcastLog(`规则已注入: ${rulePath}`)
+
+    const identity = getConfig().digitalIdentity?.trim()
+    const identityPath = path.join(rulesDir, "digital-identity.mdc")
+    if (identity) {
+      const identityMdc = [
+        "---",
+        "description: 数字身份规则 - 定义 Agent 的角色、职责和行为边界",
+        "alwaysApply: true",
+        "---",
+        "",
+        identity,
+      ].join("\r\n")
+      fs.writeFileSync(identityPath, identityMdc, "utf-8")
+    } else if (fs.existsSync(identityPath)) {
+      fs.unlinkSync(identityPath)
+    }
+
     return true
   } catch (e: unknown) {
     broadcastLog(`规则注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
@@ -756,12 +838,16 @@ function injectRulesToDir(wsDir: string): boolean {
 
 export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean } {
   const config = getConfig()
-  const mcpOk = injectMcpToGlobal()
-  const ruleOk = config.workspaceDir ? injectRulesToDir(config.workspaceDir) : false
+  if (!config.workspaceDir) return { mcpOk: false, ruleOk: false }
+  const mcpOk = injectMcpToDir(config.workspaceDir, true)
+  const ruleOk = injectRulesToDir(config.workspaceDir)
   return { mcpOk, ruleOk }
 }
 
-// ── Agent CLI 拉起 ───────────────────────────────────────
+function injectWorkspaceToDir(dir: string): boolean {
+  injectMcpToDir(dir)
+  return injectRulesToDir(dir)
+}
 
 // ── Agent 状态与会话管理（委托 agent-launcher） ─────────────
 
@@ -779,13 +865,19 @@ export type AgentLoginStatus = {
 }
 
 export const checkAgentLoggedIn = _checkAgentLoggedIn
-export const launchAgent = _launchAgent
 export const stopAgent = _stopAgent
+export const launchAgent = (initialMessage?: string) =>
+  launchSessionAgent(P2P_SESSION_KEY, "p2p", initialMessage, undefined, true)
 export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", initialMessage?: string, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean) => { ok: boolean; error?: string } =
-  (sessionKey, chatType, initialMessage, meta, useMainWorkspace) => _launchSessionAgent(sessionKey, chatType, initialMessage, injectRulesToDir, meta, useMainWorkspace)
+  (sessionKey, chatType, initialMessage, meta, useMainWorkspace) => _launchSessionAgent(sessionKey, chatType, initialMessage, injectWorkspaceToDir, meta, useMainWorkspace)
 export const stopSessionAgent = _stopSessionAgent
 export const stopAllSessionAgents = _stopAllSessionAgents
-export const getSessionAgentList = _getSessionAgentList
+export function getSessionAgentList() {
+  return _getSessionAgentList().map((s) => ({
+    ...s,
+    chatName: chatNameCache.get(s.sessionKey),
+  }))
+}
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
 
@@ -2068,6 +2160,7 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 // ── 初始化 ───────────────────────────────────────────────
 
 export function initDaemonManager(): void {
+  _setChatNameResolver((chatId) => chatNameCache.get(chatId))
   ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:launch", () => launchAgent())

@@ -154,11 +154,11 @@ const api = {
   startDaemon: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("daemon:start"),
   launchAgent: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("agent:launch"),
   stopAgent: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop"),
-  getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]> =>
+  getSessionAgents: (): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]> =>
     ipcRenderer.invoke("agent:sessions"),
   stopSessionAgent: (sessionKey: string): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-session", sessionKey),
   stopAllSessionAgents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("agent:stop-all-sessions"),
-  onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]) => void) => {
+  onSessionAgents: (cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, list: any) => cb(list)
     ipcRenderer.on("agent:sessions", handler)
     return () => { ipcRenderer.removeListener("agent:sessions", handler) }

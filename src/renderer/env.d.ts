@@ -17,6 +17,8 @@ interface AppConfig {
   noProxy: string
   agentNewSession: boolean
   closeWindowAction: "ask" | "minimize" | "quit"
+  enableGroupChat: boolean
+  digitalIdentity: string
 }
 
 interface ScheduledTask {
@@ -121,10 +123,10 @@ interface ElectronAPI {
   stopDaemon(): Promise<void>
   launchAgent(): Promise<{ ok: boolean; error?: string }>
   stopAgent(): Promise<{ ok: boolean }>
-  getSessionAgents(): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]>
+  getSessionAgents(): Promise<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]>
   stopSessionAgent(sessionKey: string): Promise<{ ok: boolean }>
   stopAllSessionAgents(): Promise<{ ok: boolean }>
-  onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number }[]) => void): () => void
+  onSessionAgents(cb: (list: { sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]) => void): () => void
   getDaemonStatus(): Promise<DaemonStatus>
   readLogs(lines?: number): Promise<string>
   getLogBuffer(): Promise<string[]>

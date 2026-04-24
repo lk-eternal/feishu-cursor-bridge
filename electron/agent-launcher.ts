@@ -19,14 +19,13 @@ const GROUP_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 const AGENT_COOLDOWN_MS = 15_000
 const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
-let agentChild: ChildProcess | null = null
 let lastAgentLaunchTime = 0
 
 export function resetAgentCooldown(): void {
   lastAgentLaunchTime = 0
 }
 
-// ── 多会话管理 ─────────────────────────────────────────
+// ── 会话 Agent ──────────────────────────────────────────
 
 interface SessionAgent {
   sessionKey: string
@@ -39,15 +38,22 @@ interface SessionAgent {
 
 const sessionAgents = new Map<string, SessionAgent>()
 
+let chatNameResolver: ((chatId: string) => string | undefined) | null = null
+
+export function setChatNameResolver(fn: (chatId: string) => string | undefined): void {
+  chatNameResolver = fn
+}
+
 function broadcastSessionStatus(): void {
   const list = [...sessionAgents.values()].map((s) => ({
     sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
     lastActivityAt: s.lastActivityAt, chatType: s.chatType,
+    chatName: chatNameResolver?.(s.sessionKey),
   }))
   broadcastSessionStatusToUi(list)
 }
 
-// ── 独立任务 Agent ─────────────────────────────────────
+// ── 独立任务 Agent ──────────────────────────────────────
 
 interface IndependentAgent {
   taskId: string
@@ -70,7 +76,7 @@ function broadcastIndependentTaskStatus(): void {
 // ── 状态查询 ──────────────────────────────────────────
 
 export function isAgentRunning(): boolean {
-  return agentChild !== null && !agentChild.killed && agentChild.exitCode === null
+  return getRunningSessionCount() > 0
 }
 
 export function isSessionAgentRunning(sessionKey: string): boolean {
@@ -83,7 +89,6 @@ export function getRunningSessionCount(): number {
   for (const sa of sessionAgents.values()) {
     if (!sa.child.killed && sa.child.exitCode === null) count++
   }
-  if (isAgentRunning()) count++
   return count
 }
 
@@ -95,7 +100,8 @@ export function getSessionAgentList() {
 }
 
 export function getAgentChildPid(): number | null {
-  return agentChild?.pid ?? null
+  const first = sessionAgents.values().next()
+  return first.done ? null : first.value.pid
 }
 
 export function getSessionAgentCount(): number {
@@ -110,7 +116,9 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
   return statuses
 }
 
-// ── 内部工具 ──────────────────────────────────────────
+// ── Prompt 构建 ──────────────────────────────────────────
+
+export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
 function buildMetaBlock(meta?: LaunchMeta): string {
   if (!meta) return ""
@@ -121,14 +129,23 @@ function buildMetaBlock(meta?: LaunchMeta): string {
   return parts.length ? `\n\n---\n消息元数据(用于回复时传入 message_id 参数):\n${parts.join("\n")}` : ""
 }
 
-function buildPrompt(chatLabel: string, initialMessage?: string, meta?: LaunchMeta): string {
-  const metaBlock = buildMetaBlock(meta)
+function buildPrompt(initialMessage?: string, meta?: LaunchMeta): string {
+  const ruleRef = "请按照digital-identity数字身份定义并遵守飞书工作流规则feishu-cursor-bridge开始工作"
+  const chatLabel = meta?.chatType === "group" ? "[群聊会话]" : "[私聊会话]"
   if (!initialMessage) {
-    return chatLabel
-      ? `请遵守飞书工作流规则feishu-cursor-bridge开始工作,${chatLabel} 先获取待处理的飞书消息，然后根据消息内容开始工作。`
-      : "请遵守飞书工作流规则feishu-cursor-bridge开始工作,先获取待处理的飞书消息，然后根据消息内容开始工作。"
+    return `${ruleRef},${chatLabel} 先获取待处理的飞书消息，然后根据消息内容开始工作。`
   }
-  return `请遵守飞书工作流规则feishu-cursor-bridge开始工作,以下是待处理的消息或定时任务：\n\n${chatLabel ? chatLabel + "\n" : ""}${initialMessage}${metaBlock}`
+  const metaBlock = buildMetaBlock(meta)
+  return `${ruleRef},以下是待处理的消息：\n\n${chatLabel}\n${initialMessage}${metaBlock}`
+}
+
+// ── 进程管理工具 ─────────────────────────────────────────
+
+function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent", ...extras }
+  delete env.NODE_USE_ENV_PROXY
+  applyProxyEnv(env, config)
+  return env
 }
 
 function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: string | false): string[] {
@@ -178,15 +195,6 @@ function ensureMainChatId(config: AppConfig, spawnEnv: Record<string, string>): 
   return getMainChatId(config) || createChatId(config, spawnEnv)
 }
 
-// ── Agent 进程管理 ───────────────────────────────────
-
-function makeSpawnEnv(config: AppConfig, extras?: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = { ...process.env as Record<string, string>, CURSOR_INVOKED_AS: "agent", ...extras }
-  delete env.NODE_USE_ENV_PROXY
-  applyProxyEnv(env, config)
-  return env
-}
-
 function spawnAgentWithLogs(args: string[], env: Record<string, string>, label: string, cwd?: string): ChildProcess {
   logCursorAgentInvocation(label, args, cwd)
   const { agentNodePath, agentIndexPath } = getAgentPaths()
@@ -212,107 +220,24 @@ function attachStreamLoggers(child: ChildProcess): void {
   })
 }
 
-function startAgentChildProcess(
-  args: string[],
-  spawnEnv: Record<string, string>,
-  canRetryWithoutResume: boolean,
-): { ok: boolean; error?: string } {
-  let stdoutAcc = ""
-  let stderrAcc = ""
-  const agentOutBuf = { current: "" }
-  const agentErrBuf = { current: "" }
-
-  try {
-    const ws = getConfig().workspaceDir?.trim() || undefined
-    const child = spawnAgentWithLogs(args, spawnEnv, "launch", ws)
-    agentChild = child
-
-    child.stdout?.on("data", (d: Buffer) => {
-      const chunk = d.toString(); stdoutAcc += chunk
-      flushAgentStreamChunk(agentOutBuf, chunk, "stdout")
-    })
-    child.stderr?.on("data", (d: Buffer) => {
-      const chunk = d.toString(); stderrAcc += chunk
-      flushAgentStreamChunk(agentErrBuf, chunk, "stderr")
-    })
-    child.on("close", (code, signal) => {
-      const combined = stdoutAcc + stderrAcc
-      if (agentOutBuf.current.trim()) { pushUiLog("Agent", "INFO", agentOutBuf.current.trim()); agentOutBuf.current = "" }
-      if (agentErrBuf.current.trim()) { pushUiLog("Agent", "WARN", agentErrBuf.current.trim()); agentErrBuf.current = "" }
-
-      const resumeIdx = args.indexOf("--resume")
-      if (canRetryWithoutResume && resumeIdx !== -1 && AGENT_NO_PREVIOUS_CHATS.test(combined)) {
-        agentChild = null
-        const config = getConfig()
-        const newChatId = createChatId(config, spawnEnv)
-        if (newChatId) {
-          broadcastLog("[Agent] --resume 会话无效，已 create-chat 获取新会话并重试", "INFO")
-          const retryArgs = [...args]; retryArgs[resumeIdx + 1] = newChatId
-          startAgentChildProcess(retryArgs, spawnEnv, false)
-        } else {
-          broadcastLog("[Agent] --resume 会话无效且 create-chat 失败，去掉 --resume 启动", "WARN")
-          const cleaned = [...args]; cleaned.splice(resumeIdx, 2)
-          startAgentChildProcess(cleaned, spawnEnv, false)
-        }
-        return
-      }
-      pushUiLog("Agent", "INFO", `退出 code=${code}${signal ? ` signal=${signal}` : ""}`)
-      agentChild = null
-    })
-    child.on("error", (e) => { pushUiLog("Agent", "ERROR", `进程错误: ${e.message}`); agentChild = null })
-    broadcastLog(`Agent 已启动, pid=${child.pid}`)
-    return { ok: true }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    broadcastLog(`[Agent] 启动失败: ${msg}`, "ERROR")
-    return { ok: false, error: msg }
-  }
-}
-
 // ── 公开 API ────────────────────────────────────────
 
-export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
+export function launchSessionAgent(
+  sessionKey: string,
+  chatType: "p2p" | "group",
+  initialMessage?: string,
+  injectWorkspaceFn?: (dir: string) => boolean,
+  meta?: LaunchMeta,
+  useMainWorkspace?: boolean,
+): { ok: boolean; error?: string } {
+  if (isSessionAgentRunning(sessionKey)) {
+    sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
+    return { ok: true }
+  }
 
-export function launchAgent(initialMessage?: string, chatType?: string, meta?: LaunchMeta): { ok: boolean; error?: string } {
-  if (isAgentRunning()) return { ok: true }
   const now = Date.now()
   if (now - lastAgentLaunchTime < AGENT_COOLDOWN_MS) return { ok: false, error: "冷却中" }
   lastAgentLaunchTime = now
-
-  const config = getConfig()
-  if (!config.workspaceDir) return { ok: false, error: "工作目录未配置" }
-  if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
-
-  const chatLabel = chatType === "group" ? "[群聊消息]" : chatType === "p2p" ? "[私聊消息]" : ""
-  const prompt = buildPrompt(chatLabel, initialMessage, meta)
-
-  const spawnEnv = makeSpawnEnv(config)
-  let resumeChatId: string | false = false
-
-  if (config.agentNewSession) {
-    if (getMainChatId(config)) setMainChatId(config.workspaceDir, "")
-  } else {
-    const chatId = ensureMainChatId(config, spawnEnv)
-    if (chatId) resumeChatId = chatId
-  }
-
-  const args = buildAgentLaunchArgs(config, prompt, resumeChatId)
-  return startAgentChildProcess(args, spawnEnv, !!resumeChatId)
-}
-
-export function stopAgent(): void {
-  if (agentChild && !agentChild.killed) {
-    try { agentChild.kill("SIGTERM") } catch { /* ignore */ }
-  }
-  agentChild = null
-}
-
-export function launchSessionAgent(sessionKey: string, chatType: "p2p" | "group", initialMessage?: string, injectRulesToDirFn?: (dir: string) => boolean, meta?: LaunchMeta, useMainWorkspace?: boolean): { ok: boolean; error?: string } {
-  if (isSessionAgentRunning(sessionKey)) {
-    const sa = sessionAgents.get(sessionKey)!
-    sa.lastActivityAt = Date.now()
-    return { ok: true }
-  }
 
   const config = getConfig()
   let workDir = config.workspaceDir
@@ -325,23 +250,25 @@ export function launchSessionAgent(sessionKey: string, chatType: "p2p" | "group"
       fs.mkdirSync(workDir, { recursive: true })
       broadcastLog(`[Agent] 创建临时工作目录: ${workDir}`)
     }
-    const staleProjectMcp = path.join(workDir, ".cursor", "mcp.json")
-    if (fs.existsSync(staleProjectMcp)) {
-      try { fs.unlinkSync(staleProjectMcp) } catch { /* ignore */ }
-    }
-    if (injectRulesToDirFn) injectRulesToDirFn(workDir)
+    if (injectWorkspaceFn) injectWorkspaceFn(workDir)
   }
 
   if (!workDir) return { ok: false, error: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
 
-  const chatLabel = chatType === "group" ? `[群聊会话 chat_id=${sessionKey}]` : "[私聊会话]"
-  const prompt = buildPrompt(chatLabel, initialMessage, meta)
-
+  const prompt = buildPrompt(initialMessage, meta)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
   const overrideConfig = { ...config, workspaceDir: workDir }
-  const chatId = ensureMainChatId(overrideConfig, spawnEnv)
-  const args = buildAgentLaunchArgs(overrideConfig, prompt, chatId || false)
+
+  let resumeChatId: string | false = false
+  if (config.agentNewSession) {
+    if (getMainChatId(overrideConfig)) setMainChatId(workDir, "")
+  } else {
+    const cid = ensureMainChatId(overrideConfig, spawnEnv)
+    if (cid) resumeChatId = cid
+  }
+
+  const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId)
 
   try {
     const ws = workDir.trim() || undefined
@@ -370,6 +297,10 @@ export function launchSessionAgent(sessionKey: string, chatType: "p2p" | "group"
   }
 }
 
+export function stopAgent(): void {
+  stopAllSessionAgents()
+}
+
 export function stopSessionAgent(sessionKey: string): void {
   const sa = sessionAgents.get(sessionKey)
   if (sa && !sa.child.killed) {
@@ -392,6 +323,8 @@ export function reapIdleGroupAgents(): void {
     }
   }
 }
+
+// ── 独立任务 Agent ──────────────────────────────────────
 
 export function launchIndependentAgent(taskId: string, taskName: string, message: string): { ok: boolean; error?: string } {
   const existing = independentAgents.get(taskId)
@@ -434,6 +367,8 @@ export function launchIndependentAgent(taskId: string, taskName: string, message
     return { ok: false, error: msg }
   }
 }
+
+// ── CLI 登录 ────────────────────────────────────────
 
 export async function checkAgentLoggedIn(): Promise<{ cliFound: boolean; loggedIn: boolean; identityLine?: string; error?: string }> {
   if (isAgentRunning()) {

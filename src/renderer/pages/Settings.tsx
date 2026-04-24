@@ -35,6 +35,7 @@ import {
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 import TitleBar from "../components/TitleBar"
+import useInlineModal from "../components/useInlineModal"
 
 interface Props { onBack: () => void }
 
@@ -73,6 +74,7 @@ export default function Settings({ onBack }: Props) {
   const [idType, setIdType] = useState<IdType>("open_id")
   const [workspaceDir, setWorkspaceDir] = useState("")
   const [enableGroupChat, setEnableGroupChat] = useState(false)
+  const [digitalIdentity, setDigitalIdentity] = useState("")
   const [model, setModel] = useState("auto")
   const [showSecret, setShowSecret] = useState(false)
   const [proxy, setProxy] = useState("")
@@ -81,22 +83,23 @@ export default function Settings({ onBack }: Props) {
   const [closeWindowAction, setCloseWindowAction] = useState<CloseWindowAction>("ask")
   const [workspaceDaemonChoice, setWorkspaceDaemonChoice] = useState<{ old: string; new: string } | null>(null)
   const [bindWaiting, setBindWaiting] = useState(false)
+  const { showAlert, showConfirm, ModalPortal } = useInlineModal()
 
   const handleBind = async () => {
     if (!appId.trim() || !appSecret.trim()) {
-      alert("请先填写飞书 App ID 和 App Secret")
+      await showAlert("提示", "请先填写飞书 App ID 和 App Secret")
       return
     }
     const status = await window.electronAPI.getDaemonStatus()
     if (!status.running) {
-      if (!confirm("绑定需要先启动 Daemon 长连接，是否立即启动？")) return
+      if (!await showConfirm("启动 Daemon", "绑定需要先启动 Daemon 长连接，是否立即启动？")) return
       const r = await window.electronAPI.startDaemon()
-      if (!r.ok) { alert(`Daemon 启动失败：${r.error || "未知错误"}`); return }
+      if (!r.ok) { await showAlert("错误", `Daemon 启动失败：${r.error || "未知错误"}`); return }
       await new Promise((r) => setTimeout(r, 2000))
     }
     setBindWaiting(true)
     const r = await window.electronAPI.startBind()
-    if (!r.ok) { setBindWaiting(false); alert(r.error || "绑定启动失败") }
+    if (!r.ok) { setBindWaiting(false); await showAlert("错误", r.error || "绑定启动失败") }
   }
 
   const [appVersion, setAppVersion] = useState("")
@@ -214,25 +217,12 @@ export default function Settings({ onBack }: Props) {
   }, [])
 
   useEffect(() => {
-    window.electronAPI.getConfig().then((config) => {
-      setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
-      setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
-      setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
-      setModel(config.model)
-      setProxy(config.httpProxy || config.httpsProxy || "")
-      setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
-      setAgentNewSession(config.agentNewSession ?? false)
-      setCloseWindowAction(config.closeWindowAction ?? "ask")
-      loaded.current = true
-    })
-    refreshMcpServers(true); refreshRules(); refreshSkills(); refreshTasks()
-    window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses)
     const unsub1 = window.electronAPI.onMcpLoginComplete(({ serverName, ok }) => {
       if (ok) setMcpServers((prev) => prev.map((s) => s.name === serverName ? { ...s, authenticated: true } : s))
     })
     const unsub2 = window.electronAPI.onScheduledTaskStatus(setTaskStatuses)
     return () => { unsub1(); unsub2() }
-  }, [refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
+  }, [])
 
   useEffect(() => {
     if (tab === "general") window.electronAPI.getConfig().then((config) => {
@@ -244,11 +234,14 @@ export default function Settings({ onBack }: Props) {
       setNoProxy(config.noProxy || "localhost,127.0.0.1,feishu.cn")
       setAgentNewSession(config.agentNewSession ?? false)
       setCloseWindowAction(config.closeWindowAction ?? "ask")
+      setDigitalIdentity(config.digitalIdentity ?? "")
+      loaded.current = true
     })
+    if (tab === "mcp") refreshMcpServers(true)
     if (tab === "rules") refreshRules()
     if (tab === "skills") refreshSkills()
     if (tab === "tasks") { refreshTasks(); window.electronAPI.getScheduledTaskStatus().then(setTaskStatuses) }
-  }, [tab, refreshRules, refreshSkills, refreshTasks])
+  }, [tab, refreshMcpServers, refreshRules, refreshSkills, refreshTasks])
 
   const autoSave = useCallback(() => {
     if (!loaded.current) return
@@ -266,6 +259,7 @@ export default function Settings({ onBack }: Props) {
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
         agentNewSession,
         closeWindowAction,
+        digitalIdentity: digitalIdentity.trim(),
       })
       if (r.needWorkspaceDaemonChoice && r.oldWorkspaceDir !== undefined && r.newWorkspaceDir !== undefined) {
         setWorkspaceDaemonChoice({ old: r.oldWorkspaceDir, new: r.newWorkspaceDir })
@@ -275,11 +269,11 @@ export default function Settings({ onBack }: Props) {
         void refreshMcpServers(true)
       }
       if (r.restartFailed) {
-        alert(`工作目录已保存，但 Daemon 未能自动启动：\n${r.restartFailed}`)
+        void showAlert("提示", `工作目录已保存，但 Daemon 未能自动启动：\n${r.restartFailed}`)
       }
       setSaved(true); setTimeout(() => setSaved(false), 1500)
     }, 500)
-  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, refreshMcpServers])
+  }, [appId, appSecret, receiveId, workspaceDir, enableGroupChat, model, proxy, noProxy, agentNewSession, closeWindowAction, digitalIdentity, refreshMcpServers])
 
   useEffect(() => { autoSave() }, [autoSave])
 
@@ -375,9 +369,9 @@ export default function Settings({ onBack }: Props) {
       if (r.ok && r.models.length > 0) {
         setModelOptions(r.models)
       } else if (r.ok) {
-        alert("未解析到任何模型。请确认已在设置中完成 Cursor CLI 登录，或在终端执行 agent --list-models 查看输出格式是否变化。")
+        void showAlert("提示", "未解析到任何模型。请确认已在设置中完成 Cursor CLI 登录，或在终端执行 agent --list-models 查看输出格式是否变化。")
       } else {
-        alert(r.error || "获取模型列表失败")
+        void showAlert("错误", r.error || "获取模型列表失败")
       }
     } finally {
       setLoadingModels(false)
@@ -394,7 +388,7 @@ export default function Settings({ onBack }: Props) {
     setMcpLoading((p) => ({ ...p, [name]: false }))
     if (!res.ok) {
       setMcpServers((prev) => prev.map((s) => s.name === name ? { ...s, enabled: !enabled } : s))
-      alert(res.output || `MCP ${enabled ? "启用" : "禁用"}失败`)
+      void showAlert("错误", res.output || `MCP ${enabled ? "启用" : "禁用"}失败`)
     }
   }
   const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "").trim()
@@ -611,13 +605,14 @@ export default function Settings({ onBack }: Props) {
                     ? <>
                         <CheckCircle2 size={16} className="text-green-400" />
                         <span className="flex-1 text-sm text-gray-300">已绑定 <span className="ml-1 font-mono text-xs text-gray-500">{receiveId}</span></span>
-                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
-                          {bindWaiting ? <Loader2 size={13} className="inline animate-spin" /> : "重新绑定"}
+                        <button type="button" onClick={handleBind} disabled={bindWaiting} className="flex items-center gap-1 text-xs text-gray-500 transition hover:text-blue-400 disabled:opacity-50">
+                          {bindWaiting && <Loader2 size={12} className="animate-spin" />}
+                          重新绑定
                         </button>
                         <span className="text-gray-700">|</span>
                         <button type="button" onClick={() => setReceiveId("")} className="text-xs text-gray-500 transition hover:text-red-400">解绑</button>
                         <span className="text-gray-700">|</span>
-                        <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) alert(r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
+                        <button type="button" onClick={async () => { const r = await window.electronAPI.testBind(); if (!r.ok) void showAlert("错误", r.error || "测试失败") }} className="text-xs text-gray-500 transition hover:text-green-400">测试</button>
                       </>
                     : <>
                         <ShieldAlert size={16} className="text-yellow-500" />
@@ -635,6 +630,11 @@ export default function Settings({ onBack }: Props) {
                     <FolderOpen size={18} className="text-blue-400" /><span className="truncate text-sm">{workspaceDir || "点击选择..."}</span>
                   </div>
                   <p className="mt-1 text-xs text-gray-600">主用户私聊时使用此目录，群聊和其他用户使用自动创建的临时目录</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">数字身份</label>
+                  <textarea value={digitalIdentity} onChange={(e) => setDigitalIdentity(e.target.value)} rows={6} placeholder="定义 Agent 在非主用户会话中的角色、职责与行为规范...&#10;留空则不注入" className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none" />
+                  <p className="mt-1 text-xs text-gray-600">群聊和其他用户会话启动时，会将此内容作为 Agent 规则注入到临时工作目录</p>
                 </div>
               </section>
               <section className="space-y-3">
@@ -1213,13 +1213,14 @@ export default function Settings({ onBack }: Props) {
           const chosenNew = workspaceDaemonChoice?.new ?? ""
           setWorkspaceDaemonChoice(null)
           if (!ok) {
-            alert(err ? `重启 Daemon 失败：\n${err}` : "重启 Daemon 失败")
+            void showAlert("错误", err ? `重启 Daemon 失败：\n${err}` : "重启 Daemon 失败")
             return
           }
           setWorkspaceDir(chosenNew)
           void refreshMcpServers(true)
         }}
       />
+      {ModalPortal}
     </div>
   )
 }

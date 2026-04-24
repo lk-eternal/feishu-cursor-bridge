@@ -29,6 +29,7 @@ export interface AppConfig {
   /** 主会话 chatId 映射（workspaceDir → chatId），用于 --resume 恢复上下文 */
   mainChatIds: Record<string, string>
   enableGroupChat: boolean
+  digitalIdentity: string
 }
 
 const defaults: AppConfig = {
@@ -49,6 +50,7 @@ const defaults: AppConfig = {
   verifiedMcpServers: [],
   mainChatIds: {},
   enableGroupChat: false,
+  digitalIdentity: "",
 }
 
 const store = new Store<AppConfig>({

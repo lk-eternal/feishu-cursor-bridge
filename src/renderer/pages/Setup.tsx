@@ -16,6 +16,7 @@ import {
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 import TitleBar from "../components/TitleBar"
+import useInlineModal from "../components/useInlineModal"
 
 interface Props {
   onComplete: () => void
@@ -47,6 +48,7 @@ export default function Setup({ onComplete }: Props) {
   const [modelOptions, setModelOptions] = useState<{ id: string; label: string }[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [cliReady, setCliReady] = useState<boolean | null>(null)
+  const { showAlert, ModalPortal } = useInlineModal()
   const [cliInstalling, setCliInstalling] = useState(false)
   const [cliMsg, setCliMsg] = useState("")
 
@@ -83,9 +85,9 @@ export default function Setup({ onComplete }: Props) {
     if (result.ok && result.models.length > 0) {
       setModelOptions(result.models)
     } else if (result.ok) {
-      alert("未解析到任何模型。请确认已登录 Cursor CLI，或在终端执行 agent --list-models 查看输出。")
+      void showAlert("提示", "未解析到任何模型。请确认已登录 Cursor CLI，或在终端执行 agent --list-models 查看输出。")
     } else {
-      alert(result.error || "获取模型列表失败")
+      void showAlert("错误", result.error || "获取模型列表失败")
     }
     setLoadingModels(false)
   }
@@ -488,7 +490,7 @@ export default function Setup({ onComplete }: Props) {
           setWorkspaceDaemonChoice(null)
           if (!ok) {
             if (err) {
-              alert(`重启 Daemon 失败：\n${err}`)
+              void showAlert("错误", `重启 Daemon 失败：\n${err}`)
             }
             return
           }
@@ -543,6 +545,7 @@ export default function Setup({ onComplete }: Props) {
           </button>
         )}
       </div>
+      {ModalPortal}
     </div>
   )
 }

@@ -1,11 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { createRequire } from "node:module";
-import { stripProxyEnv, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
-import { initFileQueue, getQueueDir, pushToFileQueue, pollFileQueue, QueueMessage, cleanupStaleMessages } from "./file-queue.js";
+import { stripProxyEnv, createLarkClient, LarkSender } from "./shared/lark-core.js";
+import { initFileQueue, pollFileQueue, cleanupStaleMessages } from "./file-queue.js";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -29,11 +27,9 @@ process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any): boolean => {
 
 const APP_ID = process.env.LARK_APP_ID ?? "";
 const APP_SECRET = process.env.LARK_APP_SECRET ?? "";
-const ENCRYPT_KEY = process.env.LARK_ENCRYPT_KEY ?? "";
 const RECEIVE_ID = process.env.LARK_RECEIVE_ID ?? "";
 const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
-const HAS_DAEMON = !!process.env.LARK_DAEMON_PORT;
 
 stripProxyEnv();
 
@@ -61,74 +57,6 @@ function gracefulShutdown(reason: string): void {
 
 const larkClient = createLarkClient(APP_ID, APP_SECRET);
 const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
-
-// ── 消息队列 ─────────────────────────────────────────────
-
-const COMMANDS = ["/stop", "/status", "/list", "/task", "/model", "/mcp", "/clean", "/reset", "/restart", "/help"];
-
-function isCommand(text: string): boolean {
-  const trimmed = text.trim().toLowerCase();
-  return COMMANDS.some((cmd) => trimmed === cmd || trimmed.startsWith(cmd + " "));
-}
-
-function pushCommandToQueue(command: string, messageId: string): void {
-  const queueDir = getQueueDir();
-  if (!queueDir) return;
-  const ts = Date.now();
-  const safeId = messageId.replace(/[^a-zA-Z0-9_-]/g, "_");
-
-  try {
-    const existing = fs.readdirSync(queueDir);
-    if (existing.some((f) => f.includes(`_${safeId}.fcmd`))) return;
-  } catch { /* ignore */ }
-
-  try {
-    const data = JSON.stringify({ command, messageId, timestamp: ts, source: `mcp-${process.pid}` });
-    const filename = `${ts}_${safeId}.fcmd`;
-    const tmpPath = path.join(queueDir, filename + ".tmp");
-    const finalPath = path.join(queueDir, filename);
-    fs.writeFileSync(tmpPath, data, "utf-8");
-    fs.renameSync(tmpPath, finalPath);
-    log("INFO", `指令已入队: ${command} (msgId=${messageId}, source=mcp)`);
-  } catch { /* ignore */ }
-}
-
-function pushMessage(content: string, messageId?: string): void {
-  if (!content?.trim()) {
-    log("WARN", `丢弃空消息 (messageId=${messageId})`);
-    return;
-  }
-  const written = pushToFileQueue(content, messageId, `mcp-${process.pid}`);
-  if (written) {
-    log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"})`);
-  } else {
-    log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
-  }
-}
-
-function startLarkConnection(): void {
-  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
-    const { text, messageId, chatId, chatType, messageType, rawContent, senderOpenId } = ev;
-
-    if (chatType === "p2p" && senderOpenId && !sender.resolvedTarget) {
-      sender.autoOpenId = senderOpenId;
-      log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
-    }
-
-    if (messageType === "text" && isCommand(text)) {
-      pushCommandToQueue(text.trim(), messageId);
-      return;
-    }
-
-    if (messageType === "image" || messageType === "post") {
-      sender.processIncomingMessage(messageId, messageType, rawContent)
-        .then((result) => pushMessage(result, messageId))
-        .catch(() => pushMessage(text, messageId));
-    } else {
-      pushMessage(text, messageId);
-    }
-  });
-}
 
 // ── MCP Server ──────────────────────────────────────────
 
@@ -188,14 +116,6 @@ mcpServer.tool(
   async ({ file_path, message_id }) => { await sender.sendFile(file_path, message_id); return { content: [{ type: "text" as const, text: "文件已发送" }] }; },
 );
 
-// ── 应用管理工具（仅在 Daemon 模式下注册）─────────────────
-
-import { registerAdminTools } from "./server-admin.js";
-
-if (HAS_DAEMON) {
-  registerAdminTools(mcpServer);
-}
-
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function main(): Promise<void> {
@@ -213,11 +133,6 @@ export async function main(): Promise<void> {
   cleanupStaleMessages();
 
   await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
-  if (HAS_DAEMON) {
-    log("INFO", "检测到 Daemon 运行中，MCP 不建立飞书 WebSocket 连接");
-  } else {
-    startLarkConnection();
-  }
 
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
