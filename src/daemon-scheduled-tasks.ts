@@ -1,10 +1,9 @@
 import { CronExpressionParser } from "cron-parser";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 
-const TASKS_DIR = path.join(os.homedir(), ".lark-bridge-mcp");
-const TASKS_FILE = path.join(TASKS_DIR, "scheduled-tasks.json");
+const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR || "";
+const TASKS_FILE = path.join(APP_DATA_DIR, "scheduled-tasks.json");
 /** 轮询间隔：不依赖单次 setTimeout 链，避免锁屏/会话节流导致整点永不触发 */
 const WATCHDOG_MS = 5_000;
 /** 仅接受计划触发时刻距今不超过此时长（短时卡顿/锁屏补救）；睡眠过久唤醒后不补跑过期槽位 */
@@ -198,14 +197,15 @@ function stopFileWatcher(): void {
 
 function startFileWatcher(cb: SchedulerCallbacks): void {
   stopFileWatcher();
-  if (!fs.existsSync(TASKS_DIR)) {
+  if (!APP_DATA_DIR) return;
+  if (!fs.existsSync(APP_DATA_DIR)) {
     try {
-      fs.mkdirSync(TASKS_DIR, { recursive: true });
+      fs.mkdirSync(APP_DATA_DIR, { recursive: true });
     } catch { /* ignore */ }
   }
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   try {
-    fileWatcher = fs.watch(TASKS_DIR, (_eventType, filename) => {
+    fileWatcher = fs.watch(APP_DATA_DIR, (_eventType, filename) => {
       if (filename !== "scheduled-tasks.json") {
         return;
       }

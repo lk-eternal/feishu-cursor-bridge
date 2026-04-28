@@ -1,27 +1,27 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
-import * as os from "node:os"
 import cron from "node-cron"
 import { CronExpressionParser } from "cron-parser"
+import { app } from "electron"
 import type { ScheduledTask } from "./config-store"
 
-const TASKS_DIR = path.join(os.homedir(), ".lark-bridge-mcp")
-const TASKS_FILE = path.join(TASKS_DIR, "scheduled-tasks.json")
+function resolveTasksFile(): string {
+  const { getConfig } = require("./config-store") as typeof import("./config-store")
+  const appId = getConfig().larkAppId || "default"
+  return path.join(app.getPath("userData"), "apps", appId, "scheduled-tasks.json")
+}
 
 export function getTasksFilePath(): string {
-  return TASKS_FILE
+  return resolveTasksFile()
 }
 
 export function readTasksFromFile(): ScheduledTask[] {
   try {
-    if (!fs.existsSync(TASKS_FILE)) {
-      return []
-    }
-    const raw = fs.readFileSync(TASKS_FILE, "utf-8")
+    const file = resolveTasksFile()
+    if (!fs.existsSync(file)) return []
+    const raw = fs.readFileSync(file, "utf-8")
     const parsed = JSON.parse(raw) as unknown
-    if (!Array.isArray(parsed)) {
-      return []
-    }
+    if (!Array.isArray(parsed)) return []
     return parsed.filter(
       (t: unknown): t is ScheduledTask =>
         typeof t === "object" && t !== null &&
@@ -37,10 +37,10 @@ export function readTasksFromFile(): ScheduledTask[] {
 
 export function writeTasksToFile(tasks: ScheduledTask[]): void {
   try {
-    if (!fs.existsSync(TASKS_DIR)) {
-      fs.mkdirSync(TASKS_DIR, { recursive: true })
-    }
-    fs.writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2), "utf-8")
+    const file = resolveTasksFile()
+    const dir = path.dirname(file)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(tasks, null, 2), "utf-8")
   } catch { /* ignore */ }
 }
 

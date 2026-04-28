@@ -10,11 +10,12 @@ import {
 } from "./daemon-scheduled-tasks.js";
 import { stripProxyEnv, localTimestamp, createLarkClient, LarkSender, LarkMessageEvent } from "./shared/lark-core.js";
 import {
-  initFileQueue as _initFileQueue,
+  initFileQueue,
   getQueueDir,
   pushToFileQueue,
   claimNextMessage,
   claimNextMessageText,
+  pollFileQueueBatch,
   pollFileQueueBatchText,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
@@ -87,8 +88,8 @@ const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, recei
 
 // ── 文件队列 ─────────────────────────────────────────────
 
-function initFileQueue(): void {
-  const dir = _initFileQueue(APP_ID);
+function initQueue(): void {
+  const dir = initFileQueue();
   log("INFO", `共享文件队列: ${dir}`);
   cleanupStaleMessages();
 }
@@ -507,11 +508,12 @@ function startHttpServer(): Promise<number> {
 // ── 管理 API 辅助函数 ────────────────────────────────────
 
 const HOME_DIR = os.homedir();
+const APP_DATA_DIR = process.env.LARK_APP_DATA_DIR || "";
 const GLOBAL_MCP_PATH = path.join(HOME_DIR, ".cursor", "mcp.json");
 const PROJECT_MCP_PATH = path.join(WORKSPACE_DIR, ".cursor", "mcp.json");
 const RULES_DIR = path.join(WORKSPACE_DIR, ".cursor", "rules");
 const SKILLS_DIR = path.join(HOME_DIR, ".cursor", "skills");
-const TASKS_FILE = path.join(HOME_DIR, ".lark-bridge-mcp", "scheduled-tasks.json");
+const TASKS_FILE = path.join(APP_DATA_DIR, "scheduled-tasks.json");
 
 function readJsonSafe(filePath: string): any {
   try {
@@ -741,6 +743,52 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     }
   }
 
+  // ── MCP Server 代理 API ──
+  if (method === "POST" && pathname === "/api/send-text") {
+    const body = JSON.parse(await readBody(req));
+    const { text, message_id, chat_id } = body as { text: string; message_id?: string; chat_id?: string };
+    if (!text) { json(res, { ok: false, error: "text is required" }, 400); return true; }
+    if (message_id) await sender.sendMessage(text, message_id);
+    else if (chat_id) await sender.sendMessageToChat(chat_id, text);
+    else await sender.sendMessage(text);
+    json(res, { ok: true });
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/send-image") {
+    const body = JSON.parse(await readBody(req));
+    const { image_path, message_id, chat_id } = body as { image_path: string; message_id?: string; chat_id?: string };
+    if (!image_path) { json(res, { ok: false, error: "image_path is required" }, 400); return true; }
+    await sender.sendImage(image_path, message_id, chat_id);
+    json(res, { ok: true });
+    return true;
+  }
+
+  if (method === "POST" && pathname === "/api/send-file") {
+    const body = JSON.parse(await readBody(req));
+    const { file_path, message_id, chat_id } = body as { file_path: string; message_id?: string; chat_id?: string };
+    if (!file_path) { json(res, { ok: false, error: "file_path is required" }, 400); return true; }
+    await sender.sendFile(file_path, message_id, chat_id);
+    json(res, { ok: true });
+    return true;
+  }
+
+  if (method === "GET" && pathname === "/api/poll-message") {
+    const qs = new URL(req.url ?? "", "http://localhost").searchParams;
+    const timeout = Number(qs.get("timeout") ?? "30000");
+    const chatIdFilter = qs.get("chatId") || undefined;
+    let disconnected = false;
+    req.on("close", () => { disconnected = true; });
+    const msg = await pollFileQueueBatch(timeout, undefined, chatIdFilter);
+    if (disconnected && msg !== null) {
+      pushToFileQueue(msg.text);
+      json(res, { message: null });
+      return true;
+    }
+    json(res, { message: msg });
+    return true;
+  }
+
   // ── Chat 名称查询 ──
   if (pathname === "/api/chat-names" && method === "POST") {
     const body = JSON.parse(await readBody(req));
@@ -820,7 +868,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
 // ── Lock 文件 ────────────────────────────────────────────
 
 function getLockFilePath(): string {
-  return path.join(WORKSPACE_DIR, ".cursor", ".lark-daemon.json");
+  return path.join(APP_DATA_DIR, "daemon.lock.json");
 }
 
 function writeLockFile(port: number): void {
@@ -861,7 +909,7 @@ export async function daemonMain(): Promise<void> {
   process.on("SIGTERM", cleanup);
   process.on("exit", removeLockFile);
 
-  initFileQueue();
+  initQueue();
   await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
   startLarkConnection();
 

@@ -1,15 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
 
 const POLL_INTERVAL_MS = 400;
 const STALE_MESSAGE_MS = 5 * 60 * 1000;
 
 let queueDir = "";
 
-export function initFileQueue(appId: string): string {
-  const suffix = appId ? appId.slice(-8) : "default";
-  queueDir = path.join(os.homedir(), ".lark-bridge-mcp", `queue-${suffix}`);
+export function initFileQueue(): string {
+  const appDataDir = process.env.LARK_APP_DATA_DIR;
+  if (!appDataDir) throw new Error("LARK_APP_DATA_DIR 环境变量未设置");
+  queueDir = path.join(appDataDir, "file-queue");
   if (!fs.existsSync(queueDir)) fs.mkdirSync(queueDir, { recursive: true });
   return queueDir;
 }

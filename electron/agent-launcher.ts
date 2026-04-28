@@ -134,7 +134,7 @@ function buildMetaBlock(meta?: LaunchMeta): string {
   if (meta.messageIds?.length) parts.push(`[message_ids=${meta.messageIds.join(",")}]`)
   if (meta.chatId) parts.push(`[chat_id=${meta.chatId}]`)
   if (meta.chatType) parts.push(`[chat_type=${meta.chatType}]`)
-  return parts.length ? `\n\n---\n消息元数据(用于回复时传入 message_id 参数):\n${parts.join("\n")}` : ""
+  return parts.length ? `\n\n---\n消息元数据:\n${parts.join("\n")}` : ""
 }
 
 function buildPrompt(initialMessage?: string, meta?: LaunchMeta): string {
@@ -250,7 +250,8 @@ export function launchSessionAgent(
   if (!useMainWorkspace) {
     if (chatType === "group" && !config.enableGroupChat) return { ok: false, error: "群聊未启用" }
     const safeChatId = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_")
-    workDir = path.join(app.getPath("userData"), "group-workspaces", safeChatId)
+    const appId = config.larkAppId || "default"
+    workDir = path.join(app.getPath("userData"), "apps", appId, "workspaces", safeChatId)
     if (!fs.existsSync(workDir)) {
       fs.mkdirSync(workDir, { recursive: true })
       broadcastLog(`[Agent] 创建临时工作目录: ${workDir}`)

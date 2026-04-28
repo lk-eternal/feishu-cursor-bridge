@@ -171,7 +171,7 @@ export class LarkSender {
     } catch (e: any) { this.log("ERROR", `飞书发送异常: ${e?.message ?? e}`); }
   }
 
-  async sendImage(imagePath: string, replyMessageId?: string): Promise<void> {
+  async sendImage(imagePath: string, replyMessageId?: string, chatId?: string): Promise<void> {
     const absPath = path.resolve(imagePath);
     if (!fs.existsSync(absPath)) { this.log("ERROR", `图片不存在: ${absPath}`); return; }
     try {
@@ -181,6 +181,8 @@ export class LarkSender {
       const content = JSON.stringify({ image_key: imageKey });
       if (replyMessageId) {
         await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "image" } });
+      } else if (chatId) {
+        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "image" } });
       } else {
         const target = this.getTarget();
         if (!target) { this.log("WARN", "无发送目标"); return; }
@@ -190,7 +192,7 @@ export class LarkSender {
     } catch (e: any) { this.log("ERROR", `发送图片异常: ${e?.message ?? e}`); }
   }
 
-  async sendFile(filePath: string, replyMessageId?: string): Promise<void> {
+  async sendFile(filePath: string, replyMessageId?: string, chatId?: string): Promise<void> {
     const absPath = path.resolve(filePath);
     if (!fs.existsSync(absPath)) { this.log("ERROR", `文件不存在: ${absPath}`); return; }
     try {
@@ -201,6 +203,8 @@ export class LarkSender {
       const content = JSON.stringify({ file_key: fileKey, file_name: fileName });
       if (replyMessageId) {
         await this.client.im.message.reply({ path: { message_id: replyMessageId }, data: { content, msg_type: "file" } });
+      } else if (chatId) {
+        await this.client.im.message.create({ params: { receive_id_type: "chat_id" as any }, data: { receive_id: chatId, content, msg_type: "file" } });
       } else {
         const target = this.getTarget();
         if (!target) { this.log("WARN", "无发送目标"); return; }

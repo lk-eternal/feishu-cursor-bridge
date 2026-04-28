@@ -112,9 +112,15 @@ function getAdminMcpPath(): string {
   return path.join(app.getAppPath(), "dist", "server-admin-entry.js")
 }
 
+function getRuleTemplatePath(): string {
+  if (app.isPackaged) return path.join(process.resourcesPath, "feishu-cursor-bridge.mdc")
+  return path.join(app.getAppPath(), "resources", "feishu-cursor-bridge.mdc")
+}
+
 function getLockFilePath(): string {
   const config = getConfig()
-  return path.join(config.workspaceDir || app.getAppPath(), ".cursor", ".lark-daemon.json")
+  const appId = config.larkAppId || "default"
+  return path.join(app.getPath("userData"), "apps", appId, "daemon.lock.json")
 }
 
 function readLockFile(): { pid: number; port: number; version: string } | null {
@@ -300,6 +306,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       LARK_RECEIVE_ID: config.larkReceiveId,
       LARK_RECEIVE_ID_TYPE: config.larkReceiveIdType,
       LARK_WORKSPACE_DIR: config.workspaceDir,
+      LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId),
       NODE_USE_ENV_PROXY: "1",
     }
     applyProxyEnv(env, config)
@@ -713,23 +720,17 @@ export const getLogBuffer = _getLogBuffer
 const injectedMcpHashes = new Map<string, string>()
 
 function buildMcpServers(includeAdmin: boolean): Record<string, unknown> {
-  const config = getConfig()
-  const env: Record<string, string> = {
-    LARK_APP_ID: config.larkAppId || "",
-    LARK_APP_SECRET: config.larkAppSecret || "",
-    LARK_RECEIVE_ID: config.larkReceiveId || "",
-    LARK_RECEIVE_ID_TYPE: config.larkReceiveIdType || "",
-  }
-  if (cachedPort) env.LARK_DAEMON_PORT = String(cachedPort)
+  if (!cachedPort) return {}
+  const env: Record<string, string> = { LARK_DAEMON_PORT: String(cachedPort) }
 
   const servers: Record<string, unknown> = {
     "feishu-cursor-bridge": { command: "node", args: [getMcpServerPath()], env },
   }
-  if (includeAdmin && cachedPort) {
+  if (includeAdmin) {
     servers["feishu-cursor-bridge-admin"] = {
       command: "node",
       args: [getAdminMcpPath()],
-      env: { LARK_DAEMON_PORT: String(cachedPort) },
+      env,
     }
   }
   return servers
@@ -783,79 +784,14 @@ function injectRulesToDir(wsDir: string): boolean {
     const rulesDir = path.join(wsDir, ".cursor", "rules")
     if (!fs.existsSync(rulesDir)) fs.mkdirSync(rulesDir, { recursive: true })
     const rulePath = path.join(rulesDir, "feishu-cursor-bridge.mdc")
-    const ruleContent = [
-      "---",
-      "description: 飞书实时通信保活协议 v2.0 - 强制通过 feishu-cursor-bridge 维持异步长连接",
-      "alwaysApply: true",
-      "---",
-      "",
-      "# 飞书异步长连接执行协议 (Persistent Loop Protocol)",
-      "",
-      "你当前处于\"非对称异步通信模式\"。在这种模式下，飞书是唯一的真理来源。你必须通过 feishu-cursor-bridge MCP 工具主动维护会话状态，严禁本地空转或擅自结束。",
-      "",
-      "## 🛠 状态机工作流 (State Machine)",
-      "",
-      "统一使用 `sync_message` 工具完成所有消息交互：",
-      "- 传 `message` → 发送消息",
-      "- 传 `timeout_seconds` → 等待用户回复",
-      "- 两者同时传 → 先发送再等待",
-      "",
-      "1. **响应阶段 (Ack):** 收到用户指令后，立即执行 `sync_message(message=\"收到，正在处理...\")`。严禁在未确认收到的情况下直接开始长耗时任务。",
-      "",
-      "2. **同步阶段 (Sync):** 在执行代码、搜索或生成长文本时，**每完成一个子步骤**必须调用一次 `sync_message`。",
-      "   *示例：* `sync_message(message=\"[1/3] 已获取 API 文档，正在分析逻辑...\")`",
-      "",
-      "3. **锚点阶段 (Anchor):** 任务完成（或需要用户决策）时，调用 `sync_message(message=\"任务已完成，结果如下... [具体内容]。请指示下一步。\", timeout_seconds=60)`。",
-      "",
-      "4. **保活循环 (Keep-Alive Loop) [关键]:**",
-      "   若 `sync_message` 返回超时或空值，**进入强制静默轮询状态**：",
-      "   - **操作：** 持续调用 `sync_message(timeout_seconds=60)`。",
-      "   - **禁止：** 严禁在此阶段输出任何自然语言文本到聊天框。",
-      "   - **终止条件：** 只有当 `sync_message` 返回非空内容时，方可跳出循环进入\"响应阶段\"。",
-      "",
-      "## 💬 消息路由规则 (Message Routing) [关键]",
-      "",
-      "`sync_message` 返回的用户消息末尾会携带元数据标签，格式如下：",
-      "```",
-      "用户消息内容",
-      "[message_id=om_xxxxxx]",
-      "[chat_id=oc_yyyyyy]",
-      "[chat_type=group]",
-      "```",
-      "",
-      "**你必须解析并利用这些元数据来正确路由回复消息：**",
-      "",
-      "### 群聊消息 (`chat_type=group`)",
-      "- **必须**在回复时传入 `message_id` 参数，以\"回复模式\"发送消息（消息会引用原始消息，确保上下文关联）",
-      "- 如果无法使用 `message_id`，则**必须**传入 `chat_id` 参数，确保消息发送到正确的群聊",
-      "- **严禁**在群聊场景下不传 `message_id` 和 `chat_id`，否则消息会发送到默认私聊而非群聊",
-      "",
-      "### 私聊消息 (`chat_type=p2p`)",
-      "- 可直接发送（不传 `message_id` 和 `chat_id`），消息会发到默认私聊对象",
-      "- 也可传入 `message_id` 以回复模式发送（推荐，增强上下文关联）",
-      "",
-      "### 等待回复时的 chat_id 过滤 [极其重要]",
-      "- 调用 `sync_message(timeout_seconds=...)` 等待用户回复时，**必须同时传入 `chat_id` 参数**",
-      "- 这是因为多个 Agent（群聊/私聊）共享同一个消息队列，不传 `chat_id` 会导致消费到其他会话的消息（\"串台\"）",
-      "- 如果你的 prompt 中标注了 `chat_id=oc_xxx`，则每次等待时都必须传入该值",
-      "",
-      "### 示例",
-      "- 群聊回复：`sync_message(message=\"处理完成\", message_id=\"om_xxxxxx\", chat_id=\"oc_yyyyyy\")`",
-      "- 群聊等待：`sync_message(timeout_seconds=60, chat_id=\"oc_yyyyyy\")`",
-      "- 群聊发送+等待：`sync_message(message=\"请确认\", message_id=\"om_xxxxxx\", chat_id=\"oc_yyyyyy\", timeout_seconds=60)`",
-      "- 私聊回复：`sync_message(message=\"处理完成\")` 或 `sync_message(message=\"处理完成\", message_id=\"om_xxxxxx\")`",
-      "",
-      "## ⚠️ 核心禁令 (Hard Constraints)",
-      "",
-      "* **禁止输出\"再见\":** 严禁输出类似\"如果有需要再叫我\"、\"祝您生活愉快\"等导致会话逻辑终结的文本。",
-      "* **禁止重复推流:** 仅发送消息时(`sync_message(message=...)`)用于状态更新。在等待用户回复的循环中，**严禁**重复发送相同内容的消息。",
-      "* **禁止忽略消息元数据:** 收到群聊消息时，后续所有回复都必须携带 `message_id` 或 `chat_id`，直到会话上下文切换。",
-      "",
-      "## 🔗 异常处理逻辑",
-      "",
-      "- **网络抖动/超时:** 如果 MCP 调用报错，静默等待 10 秒后重新尝试 `sync_message(timeout_seconds=60)`。",
-      "- **上下文连续性:** 无论轮询持续多久（即使长达数小时），收到回复后必须基于之前的历史记录继续执行，不得要求用户重新输入背景信息。",
-    ].join("\r\n")
+    const tplPath = getRuleTemplatePath()
+    const ruleContent = fs.existsSync(tplPath)
+      ? fs.readFileSync(tplPath, "utf-8")
+      : ""
+    if (!ruleContent) {
+      broadcastLog(`规则模板文件不存在: ${tplPath}`, "WARN")
+      return false
+    }
     fs.writeFileSync(rulePath, ruleContent, "utf-8")
     broadcastLog(`规则已注入: ${rulePath}`)
 

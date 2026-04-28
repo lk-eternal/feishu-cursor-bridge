@@ -2,8 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createRequire } from "node:module";
-import { stripProxyEnv, createLarkClient, LarkSender } from "./shared/lark-core.js";
-import { initFileQueue, pollFileQueue, cleanupStaleMessages } from "./file-queue.js";
+import http from "node:http";
 
 const _require = createRequire(import.meta.url);
 const PKG_VERSION: string = (_require("../package.json") as { version: string }).version;
@@ -25,21 +24,62 @@ process.stdout.write = ((chunk: any, encodingOrCb?: any, cb?: any): boolean => {
 
 // ── 环境变量 ──────────────────────────────────────────────
 
-const APP_ID = process.env.LARK_APP_ID ?? "";
-const APP_SECRET = process.env.LARK_APP_SECRET ?? "";
-const RECEIVE_ID = process.env.LARK_RECEIVE_ID ?? "";
-const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
-const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
-
-stripProxyEnv();
+const DAEMON_PORT = process.env.LARK_DAEMON_PORT ?? "";
 
 // ── 日志 ─────────────────────────────────────────────────
 
-import { localTimestamp } from "./shared/lark-core.js";
+function localTimestamp(): string {
+  return new Date().toLocaleString("zh-CN", { hour12: false });
+}
 
 function log(level: string, ...args: unknown[]): void {
   const msg = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
   process.stderr.write(`[${localTimestamp()}][${level}] ${msg}\n`);
+}
+
+// ── Daemon HTTP Client ───────────────────────────────────
+
+function daemonUrl(path: string): string {
+  return `http://127.0.0.1:${DAEMON_PORT}${path}`;
+}
+
+function httpJson<T = any>(url: string, body?: unknown): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const isPost = body !== undefined;
+    const payload = isPost ? JSON.stringify(body) : undefined;
+    const parsed = new URL(url);
+
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname + parsed.search,
+      method: isPost ? "POST" : "GET",
+      headers: isPost ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload!) } : undefined,
+      timeout: 180_000,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        } catch (e) {
+          reject(new Error(`daemon JSON parse error: ${Buffer.concat(chunks).toString().slice(0, 200)}`));
+        }
+      });
+    });
+
+    req.on("error", (e) => reject(new Error(`daemon request failed: ${e.message}`)));
+    req.on("timeout", () => { req.destroy(); reject(new Error("daemon request timeout")); });
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function pollDaemon(timeoutMs: number, chatId?: string): Promise<{ text: string; messageId: string; chatId: string; chatType: string; senderOpenId: string } | null> {
+  const params = new URLSearchParams({ timeout: String(timeoutMs) });
+  if (chatId) params.set("chatId", chatId);
+  const res = await httpJson<{ message: any }>(daemonUrl(`/api/poll-message?${params}`));
+  return res.message ?? null;
 }
 
 // ── 优雅退出 ─────────────────────────────────────────────
@@ -52,11 +92,6 @@ function gracefulShutdown(reason: string): void {
   log("INFO", `进程退出中 (reason=${reason}, PID=${process.pid})`);
   setTimeout(() => process.exit(0), 300);
 }
-
-// ── Lark ─────────────────────────────────────────────────
-
-const larkClient = createLarkClient(APP_ID, APP_SECRET);
-const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
 
 // ── MCP Server ──────────────────────────────────────────
 
@@ -74,13 +109,11 @@ mcpServer.tool(
   async ({ message, timeout_seconds, message_id, chat_id }) => {
     try {
       if (message) {
-        if (message_id) await sender.sendMessage(message, message_id);
-        else if (chat_id) await sender.sendMessageToChat(chat_id, message);
-        else await sender.sendMessage(message);
+        await httpJson(daemonUrl("/api/send-text"), { text: message, message_id, chat_id });
       }
       const timeoutMs = (timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0;
       if (timeoutMs > 0) {
-        const reply = await pollFileQueue(timeoutMs, undefined, chat_id);
+        const reply = await pollDaemon(timeoutMs, chat_id);
         if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };
         const meta = [reply.text];
         if (reply.messageId) meta.push(`[message_id=${reply.messageId}]`);
@@ -102,8 +135,12 @@ mcpServer.tool(
   {
     image_path: z.string().describe("图片绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
   },
-  async ({ image_path, message_id }) => { await sender.sendImage(image_path, message_id); return { content: [{ type: "text" as const, text: "图片已发送" }] }; },
+  async ({ image_path, message_id, chat_id }) => {
+    await httpJson(daemonUrl("/api/send-image"), { image_path, message_id, chat_id });
+    return { content: [{ type: "text" as const, text: "图片已发送" }] };
+  },
 );
 
 mcpServer.tool(
@@ -112,27 +149,26 @@ mcpServer.tool(
   {
     file_path: z.string().describe("文件绝对路径"),
     message_id: z.string().optional().describe("要回复的消息ID，传入后以回复模式发送"),
+    chat_id: z.string().optional().describe("目标会话ID，用于精确投递到对应的群或私聊"),
   },
-  async ({ file_path, message_id }) => { await sender.sendFile(file_path, message_id); return { content: [{ type: "text" as const, text: "文件已发送" }] }; },
+  async ({ file_path, message_id, chat_id }) => {
+    await httpJson(daemonUrl("/api/send-file"), { file_path, message_id, chat_id });
+    return { content: [{ type: "text" as const, text: "文件已发送" }] };
+  },
 );
 
 // ── 主函数 ───────────────────────────────────────────────
 
 export async function main(): Promise<void> {
-  if (!APP_ID || !APP_SECRET) {
-    log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置");
+  if (!DAEMON_PORT) {
+    log("ERROR", "LARK_DAEMON_PORT 未配置");
     process.exit(1);
   }
 
   log("INFO", "════════════════════════════════════════════════");
   log("INFO", `feishu-cursor-bridge MCP v${PKG_VERSION} 启动 (PID=${process.pid})`);
+  log("INFO", `Daemon endpoint: http://127.0.0.1:${DAEMON_PORT}`);
   log("INFO", "════════════════════════════════════════════════");
-
-  const queueDir = initFileQueue(APP_ID);
-  log("INFO", `共享文件队列: ${queueDir}`);
-  cleanupStaleMessages();
-
-  await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
 
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);

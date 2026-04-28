@@ -30,6 +30,8 @@ extraResources:
     to: icon.png
   - from: resources/icon.ico
     to: icon.ico
+  - from: resources/feishu-cursor-bridge.mdc
+    to: feishu-cursor-bridge.mdc
 
 win:
   icon: resources/icon.ico
