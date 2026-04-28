@@ -2200,7 +2200,9 @@ export function initDaemonManager(): void {
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
   ipcMain.handle("scheduled-tasks:get", () => {
-    return readTasksFromFile()
+    const tasks = readTasksFromFile()
+    console.log("[IPC] scheduled-tasks:get returned", tasks.length, "tasks")
+    return tasks
   })
   ipcMain.handle("scheduled-tasks:save", (_, tasks) => {
     writeTasksToFile(tasks)

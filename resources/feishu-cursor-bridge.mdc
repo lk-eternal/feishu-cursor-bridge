@@ -42,7 +42,7 @@ alwaysApply: true
 
 ## 🏷 消息路由与元数据 (Message Routing)
 
-当 `sync_message` 返回用户消息时，末尾必定携带元数据。你必须在**当前轮次的整个生命周期内**记住最新的并使用这些元数据。
+当 `sync_message` 返回用户消息时，末尾必定携带元数据，请记住最新一条信息的元数据中的message_id和chat_id。
 
 **元数据格式示例：**
 > [message_id=om_xxxxxx]

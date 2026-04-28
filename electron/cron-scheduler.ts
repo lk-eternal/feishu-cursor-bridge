@@ -3,10 +3,9 @@ import * as path from "node:path"
 import cron from "node-cron"
 import { CronExpressionParser } from "cron-parser"
 import { app } from "electron"
-import type { ScheduledTask } from "./config-store"
+import { getConfig, type ScheduledTask } from "./config-store"
 
 function resolveTasksFile(): string {
-  const { getConfig } = require("./config-store") as typeof import("./config-store")
   const appId = getConfig().larkAppId || "default"
   return path.join(app.getPath("userData"), "apps", appId, "scheduled-tasks.json")
 }

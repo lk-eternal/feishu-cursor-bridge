@@ -847,6 +847,15 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     const { action } = body as { action: string };
     const supportedActions = ["stop", "restart", "reset", "clean"];
 
+    if (action === "launch-temp") {
+      const { message } = body as { message?: string };
+      if (!message?.trim()) { json(res, { ok: false, error: "message is required" }, 400); return true; }
+      const taskId = `temp-${Date.now()}`;
+      const payload = JSON.stringify({ taskId, taskName: "临时会话", content: message.trim() });
+      process.stdout.write(`__IND_LAUNCH__:${payload}\n`);
+      json(res, { ok: true, taskId, message: "临时 Agent 已启动" });
+      return true;
+    }
     if (action === "clean") {
       const cleared = clearFileQueue();
       json(res, { ok: true, cleared });
@@ -858,7 +867,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       json(res, { ok: true, message: `/${action} command queued` });
       return true;
     }
-    json(res, { ok: false, error: `unknown action, supported: ${supportedActions.join(", ")}` }, 400);
+    json(res, { ok: false, error: `unknown action, supported: ${[...supportedActions, "launch-temp"].join(", ")}` }, 400);
     return true;
   }
 

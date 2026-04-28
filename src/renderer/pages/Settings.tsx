@@ -191,7 +191,12 @@ export default function Settings({ onBack, onResetSetup }: Props) {
     window.electronAPI.getSkills().then(setSkills)
     window.electronAPI.getSkillTree().then(setSkillTree)
   }, [])
-  const refreshTasks = useCallback(() => { window.electronAPI.getScheduledTasks().then(setTasks) }, [])
+  const refreshTasks = useCallback(() => {
+    window.electronAPI.getScheduledTasks().then((t) => {
+      console.log("[Settings] getScheduledTasks returned", t.length, "tasks", t)
+      setTasks(t)
+    }).catch((e) => console.error("[Settings] getScheduledTasks error:", e))
+  }, [])
 
   useEffect(() => {
     void window.electronAPI.getAppVersion().then(setAppVersion)
@@ -1027,7 +1032,15 @@ export default function Settings({ onBack, onResetSetup }: Props) {
               </section>
 
               <section className="space-y-3">
-                <h3 className="text-sm font-medium text-gray-300">飞书应用权限要求</h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-gray-300">飞书应用权限要求</h3>
+                  {appId.trim() && (
+                    <a href={`https://open.feishu.cn/app/${appId.trim()}/auth`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
+                      <ExternalLink size={12} />前往设置权限
+                    </a>
+                  )}
+                </div>
                 <p className="text-xs text-gray-500">创建飞书自建应用后，需在「权限管理」中开通以下全部权限并发布版本后方可使用。</p>
                 <div className="overflow-hidden rounded-lg border border-gray-700">
                   <table className="w-full text-xs">
@@ -1054,7 +1067,15 @@ export default function Settings({ onBack, onResetSetup }: Props) {
               </section>
 
               <section className="space-y-3">
-                <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
+                  {appId.trim() && (
+                    <a href={`https://open.feishu.cn/app/${appId.trim()}/event`} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
+                      <ExternalLink size={12} />前往设置事件订阅
+                    </a>
+                  )}
+                </div>
                 <p className="text-xs text-gray-500">在飞书开放平台「事件订阅」页面添加以下事件，并选择 <strong className="text-gray-300">应用身份</strong> 订阅类型：</p>
                 <div className="overflow-hidden rounded-lg border border-gray-700">
                   <table className="w-full text-xs">
@@ -1063,7 +1084,17 @@ export default function Settings({ onBack, onResetSetup }: Props) {
                       <tr className="border-b border-gray-800/50">
                         <td className="px-3 py-1.5 text-gray-300">接收消息 v2.0</td>
                         <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im.message.receive_v1</td>
-                        <td className="px-3 py-1.5 text-gray-400">接收用户私聊和群聊 @机器人消息</td>
+                        <td className="px-3 py-1.5 text-gray-400">事件回调入口</td>
+                      </tr>
+                      <tr className="border-b border-gray-800/50">
+                        <td className="px-3 py-1.5 text-gray-300">读取用户发给机器人的单聊消息</td>
+                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im:message</td>
+                        <td className="px-3 py-1.5 text-emerald-400">需开通</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-1.5 text-gray-300">获取群组中用户@机器人消息</td>
+                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im:message.group_at_msg</td>
+                        <td className="px-3 py-1.5 text-emerald-400">需开通</td>
                       </tr>
                     </tbody>
                   </table>

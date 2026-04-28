@@ -41,7 +41,7 @@ const REQUIRED_SCOPES = [
   { scope: "im:message.group_at_msg:readonly", desc: "接收群聊 @消息" },
   { scope: "im:resource", desc: "上传/下载图片与文件" },
   { scope: "im:chat:read", desc: "获取群聊名称" },
-  { scope: "contact:user.base:readonly", desc: "获取用户名（私聊会话显示）" },
+  { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
 ]
 
 const SCOPES_JSON = JSON.stringify(
@@ -253,12 +253,16 @@ export default function Setup({ onComplete, onExit }: Props) {
         setupComplete: true,
       })
 
-      if (saveR.needWorkspaceDaemonChoice && saveR.oldWorkspaceDir !== undefined && saveR.newWorkspaceDir !== undefined) {
-        updateLaunchStep(0, { status: "pending", message: "请确认是否在新目录下重启 Daemon" })
-        setWorkspaceDaemonChoice({ old: saveR.oldWorkspaceDir, new: saveR.newWorkspaceDir, deferred: !!saveR.deferredSetupComplete })
-        setWorkspaceDir(saveR.oldWorkspaceDir)
-        setLaunching(false)
-        return
+      if (saveR.needWorkspaceDaemonChoice && saveR.newWorkspaceDir) {
+        updateLaunchStep(0, { status: "running", message: "正在切换工作目录并重启 Daemon…" })
+        const r = await window.electronAPI.applyWorkspaceDaemonRestart(saveR.newWorkspaceDir.trim())
+        if (!r.ok) {
+          updateLaunchStep(0, { status: "error", message: r.error ?? "Daemon 重启失败" })
+          setLaunching(false)
+          return
+        }
+        if (saveR.deferredSetupComplete) await window.electronAPI.saveConfig({ setupComplete: true })
+        setWorkspaceDir(saveR.newWorkspaceDir)
       }
 
       updateLaunchStep(0, { status: "done", message: "配置已加密保存" })
@@ -372,12 +376,21 @@ export default function Setup({ onComplete, onExit }: Props) {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-medium text-gray-300">应用权限</h3>
-                <button
-                  onClick={() => { navigator.clipboard.writeText(SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }}
-                  className="flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
-                >
-                  <Copy size={12} />{scopesCopied ? "已复制" : "复制权限 JSON"}
-                </button>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={`https://open.feishu.cn/app/${appId.trim()}/auth`}
+                    target="_blank" rel="noreferrer"
+                    className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400"
+                  >
+                    <ExternalLink size={12} />前往设置权限
+                  </a>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(SCOPES_JSON); setScopesCopied(true); setTimeout(() => setScopesCopied(false), 2000) }}
+                    className="flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
+                  >
+                    <Copy size={12} />{scopesCopied ? "已复制" : "复制权限 JSON"}
+                  </button>
+                </div>
               </div>
               <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
                 {REQUIRED_SCOPES.map((p) => (
@@ -391,13 +404,30 @@ export default function Setup({ onComplete, onExit }: Props) {
 
             {/* 事件订阅 */}
             <div className="space-y-2">
-              <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
-              <div className="rounded-lg border border-gray-800 p-3 space-y-2">
-                <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
+                <a
+                  href={`https://open.feishu.cn/app/${appId.trim()}/event`}
+                  target="_blank" rel="noreferrer"
+                  className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400"
+                >
+                  <ExternalLink size={12} />前往设置事件订阅
+                </a>
+              </div>
+              <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                <div className="px-3 py-2 flex items-center justify-between">
                   <code className="text-xs text-blue-400">im.message.receive_v1</code>
                   <span className="text-xs text-gray-500">接收消息 v2.0</span>
                 </div>
-                <div className="text-xs text-gray-500 space-y-1">
+                <div className="px-3 py-2 flex items-center justify-between">
+                  <span className="text-xs text-gray-300">读取用户发给机器人的单聊消息</span>
+                  <span className="text-xs text-emerald-400">需开通</span>
+                </div>
+                <div className="px-3 py-2 flex items-center justify-between">
+                  <span className="text-xs text-gray-300">获取群组中用户@机器人消息</span>
+                  <span className="text-xs text-emerald-400">需开通</span>
+                </div>
+                <div className="px-3 py-2 text-xs text-gray-500 space-y-1">
                   <div>订阅方式：<span className="text-gray-300">应用身份</span></div>
                   <div>回调类型：<span className="text-gray-300">长连接（WebSocket）</span></div>
                 </div>

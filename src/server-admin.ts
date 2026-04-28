@@ -71,6 +71,24 @@ export function registerAdminTools(mcpServer: McpServer): void {
     },
   );
 
+  // ── launch_temp_agent ── 独立启动临时 Agent 会话
+
+  mcpServer.tool(
+    "launch_temp_agent",
+    "独立启动一个临时 Agent 会话（不绑定主会话ID），执行完毕后自动退出。类似定时任务的独立模式。",
+    {
+      message: z.string().describe("要交给临时 Agent 执行的任务描述/指令"),
+    },
+    async ({ message }) => {
+      try {
+        const res = await daemonPost("/api/agent", { action: "launch-temp", message });
+        return txt(res.ok ? `🚀 临时 Agent 已启动 (id=${res.taskId})` : `❌ ${res.error ?? "启动失败"}`);
+      } catch (e: any) {
+        return txt(`❌ Daemon 通信失败: ${e?.message ?? e}`);
+      }
+    },
+  );
+
   // ── manage_mcp ──
 
   mcpServer.tool(
