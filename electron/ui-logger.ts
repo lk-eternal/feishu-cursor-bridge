@@ -57,7 +57,7 @@ export function flushAgentStreamChunk(
   }
 }
 
-export function broadcastSessionStatus(sessionData: { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string }[]): void {
+export function broadcastSessionStatus(sessionData: { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string }[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("agent:sessions", sessionData)
   }

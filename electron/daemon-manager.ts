@@ -24,7 +24,7 @@ import {
   checkAgentLoggedIn as _checkAgentLoggedIn, loginCli as _loginCli,
   reapIdleGroupAgents as _reapIdleGroupAgents,
   getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
-  P2P_SESSION_KEY, setMainChatId,
+  P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId as _getMainChatId,
   setChatNameResolver as _setChatNameResolver,
 } from "./agent-launcher"
 
@@ -498,6 +498,11 @@ function startStatusPolling(): void {
         .map((s) => s.sessionKey)
       if (uncachedGroups.length > 0) await fetchChatNames(uncachedGroups)
 
+      const uncachedP2pOpenIds = sessions
+        .filter((s) => s.chatType === "p2p" && s.senderOpenId && !chatNameCache.has(s.senderOpenId))
+        .map((s) => s.senderOpenId!)
+      if (uncachedP2pOpenIds.length > 0) await fetchUserNames(uncachedP2pOpenIds)
+
       if (status.running) {
         await checkAndExecutePendingCommands()
       }
@@ -526,6 +531,19 @@ async function fetchChatNames(chatIds: string[]): Promise<void> {
   if (!lock?.port) return
   try {
     const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/chat-names`, { chatIds: missing }, 15_000)) as { names?: Record<string, string> }
+    if (res?.names) {
+      for (const [id, name] of Object.entries(res.names)) chatNameCache.set(id, name)
+    }
+  } catch { /* ignore */ }
+}
+
+async function fetchUserNames(openIds: string[]): Promise<void> {
+  const missing = openIds.filter((id) => id && !chatNameCache.has(id))
+  if (missing.length === 0) return
+  const lock = readLockFile()
+  if (!lock?.port) return
+  try {
+    const res = (await httpPost(`http://127.0.0.1:${lock.port}/api/user-names`, { openIds: missing }, 15_000)) as { names?: Record<string, string> }
     if (res?.names) {
       for (const [id, name] of Object.entries(res.names)) chatNameCache.set(id, name)
     }
@@ -600,8 +618,6 @@ async function dispatchSessionAgents(): Promise<void> {
   if (groupChatIds.length > 0) await fetchChatNames(groupChatIds)
 
   for (const { chatId, chatType } of chats) {
-    if (_isSessionAgentRunning(chatId)) continue
-    await new Promise((r) => setTimeout(r, 500))
     const bundled = await pullMergedMessagesFromQueue(chatId)
     if (!bundled) continue
 
@@ -609,14 +625,28 @@ async function dispatchSessionAgents(): Promise<void> {
     const mainUser = isMainUser(bundled.senderOpenId, chatId, chatType)
     const useMainWorkspace = mainUser && chatType === "p2p"
 
-    const chatName = chatNameCache.get(chatId)
+    if (chatType === "p2p" && bundled.senderOpenId && !chatNameCache.has(bundled.senderOpenId)) {
+      await fetchUserNames([bundled.senderOpenId])
+    }
+
+    const sessionKey = useMainWorkspace
+      ? makeMainP2pSessionKey(chatId, config.workspaceDir)
+      : chatId
+
+    if (_isSessionAgentRunning(sessionKey)) {
+      continue
+    }
+    await new Promise((r) => setTimeout(r, 500))
+
+    const userName = bundled.senderOpenId ? chatNameCache.get(bundled.senderOpenId) : undefined
+    const chatName = chatNameCache.get(chatId) || userName
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
-      : (mainUser ? "主用户私聊" : `私聊 ${chatId}`)
+      : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有 ${bundled.count} 条消息，自动拉起${useMainWorkspace ? "(主工作目录)" : ""}`)
 
-    const result = launchSessionAgent(chatId, chatType as "p2p" | "group", bundled.text, meta, useMainWorkspace)
-    if (!result.ok) broadcastLog(`[Agent] ${chatId} 启动跳过: ${result.error}`)
+    const result = launchSessionAgent(sessionKey, chatType as "p2p" | "group", bundled.text, meta, useMainWorkspace, bundled.senderOpenId)
+    if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
   }
 }
 
@@ -725,10 +755,26 @@ function injectMcpToDir(wsDir: string, includeAdmin = false): boolean {
     fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf-8")
     injectedMcpHashes.set(wsDir, hash)
     broadcastLog(`MCP 已注入: ${mcpPath}`)
+
+    enableMcpServersAsync(wsDir, Object.keys(newServers))
     return true
   } catch (e: unknown) {
     broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
     return false
+  }
+}
+
+function enableMcpServersAsync(wsDir: string, serverNames: string[]): void {
+  const config = getConfig()
+  const env: Record<string, string> = { ...process.env as Record<string, string> }
+  applyProxyEnv(env, config)
+  for (const name of serverNames) {
+    spawnAsync(["mcp", "enable", name], wsDir, env).then((r) => {
+      const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
+      broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
+    }).catch((e: unknown) => {
+      broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
+    })
   }
 }
 
@@ -868,15 +914,15 @@ export const checkAgentLoggedIn = _checkAgentLoggedIn
 export const stopAgent = _stopAgent
 export const launchAgent = (initialMessage?: string) =>
   launchSessionAgent(P2P_SESSION_KEY, "p2p", initialMessage, undefined, true)
-export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", initialMessage?: string, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean) => { ok: boolean; error?: string } =
-  (sessionKey, chatType, initialMessage, meta, useMainWorkspace) => _launchSessionAgent(sessionKey, chatType, initialMessage, injectWorkspaceToDir, meta, useMainWorkspace)
+export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", initialMessage?: string, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean, senderOpenId?: string) => { ok: boolean; error?: string } =
+  (sessionKey, chatType, initialMessage, meta, useMainWorkspace, senderOpenId) => _launchSessionAgent(sessionKey, chatType, initialMessage, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
 export const stopSessionAgent = _stopSessionAgent
 export const stopAllSessionAgents = _stopAllSessionAgents
 export function getSessionAgentList() {
-  return _getSessionAgentList().map((s) => ({
-    ...s,
-    chatName: chatNameCache.get(s.sessionKey),
-  }))
+  return _getSessionAgentList().map((s) => {
+    const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
+    return { ...s, chatName: chatNameCache.get(chatId) }
+  })
 }
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
@@ -1641,11 +1687,10 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             if (newDir === cfg.workspaceDir) {
               await reply(true, `📂 工作目录未变化: ${newDir}`)
             } else {
-              await reply(true, `📂 正在切换工作目录到: ${newDir}\n⏳ 需要重启 Daemon 生效...`)
-              stopAgent()
-              const wsResult = await applyWorkspaceDirRestart(newDir)
+              await reply(true, `📂 正在切换工作目录到: ${newDir}\n⏳ 切换中...`)
+              const wsResult = await applyWorkspaceDirChange(newDir)
               if (wsResult.ok) {
-                broadcastLog(`[指令 /workspace] 已切换到 ${newDir} 并重启 Daemon`, "INFO")
+                broadcastLog(`[指令 /workspace] 已切换到 ${newDir}`, "INFO")
               } else {
                 broadcastLog(`[指令 /workspace] 切换失败: ${wsResult.error}`, "ERROR")
               }
@@ -2112,20 +2157,31 @@ export interface ConfigSaveResult {
 }
 
 /**
+ * 切换工作目录：不终止任何 session，旧会话保留供用户切回。
+ * 新消息会通过复合 sessionKey (chatId::workspaceDir) 路由到当前活跃目录。
+ */
+export async function applyWorkspaceDirChange(workspaceDir: string): Promise<{ ok: boolean; error?: string }> {
+  const w = workspaceDir.trim()
+  if (!w) return { ok: false, error: "工作目录为空" }
+
+  saveConfig({ workspaceDir: w })
+  invalidateMcpEnabledCache()
+  injectWorkspaceMcpAndRules()
+  broadcastStatus(await getDaemonStatus())
+  return { ok: true }
+}
+
+/**
  * 在新工作目录下保存并重启 Daemon（由渲染进程在确认后调用）。
  */
 export async function applyWorkspaceDirRestart(workspaceDir: string): Promise<{ ok: boolean; error?: string }> {
   const w = workspaceDir.trim()
-  if (!w) {
-    return { ok: false, error: "工作目录为空" }
-  }
+  if (!w) return { ok: false, error: "工作目录为空" }
   saveConfig({ workspaceDir: w })
   await stopDaemon()
   const started = await startDaemon()
   broadcastStatus(await getDaemonStatus())
-  if (!started.ok) {
-    return { ok: false, error: started.error ?? "Daemon 启动失败" }
-  }
+  if (!started.ok) return { ok: false, error: started.error ?? "Daemon 启动失败" }
   return { ok: true }
 }
 

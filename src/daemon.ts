@@ -757,6 +757,25 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     return true;
   }
 
+  // ── 用户名查询（通过 open_id 获取用户名）──
+  if (pathname === "/api/user-names" && method === "POST") {
+    const body = JSON.parse(await readBody(req));
+    const openIds = Array.isArray(body.openIds) ? body.openIds as string[] : [];
+    const names: Record<string, string> = {};
+    for (const oid of openIds) {
+      try {
+        const r: any = await larkClient.contact.user.get({
+          path: { user_id: oid },
+          params: { user_id_type: "open_id" },
+        });
+        const name = r?.data?.user?.name;
+        if (name) names[oid] = name;
+      } catch { /* ignore */ }
+    }
+    json(res, { ok: true, names });
+    return true;
+  }
+
   // ── Workspace 管理 ──
   if (pathname === "/api/workspace") {
     if (method === "GET") {

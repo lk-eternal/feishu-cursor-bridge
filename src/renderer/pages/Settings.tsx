@@ -31,16 +31,20 @@ import {
   Folder,
   FilePlus,
   FolderPlus,
+  BookOpen,
+  ExternalLink,
+  Copy,
+  RotateCcw,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 
-interface Props { onBack: () => void }
+interface Props { onBack: () => void; onResetSetup?: () => void }
 
 type IdType = "open_id" | "user_id" | "chat_id"
-type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills"
+type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -55,6 +59,15 @@ const MCP_TEMPLATE = JSON.stringify({
 }, null, 2)
 const emptyMcpForm: McpEditForm = { json: MCP_TEMPLATE, source: "global" }
 
+const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
+  { scope: "im:message", desc: "发送消息（create / reply）" },
+  { scope: "im:message.p2p_msg:readonly", desc: "接收私聊消息" },
+  { scope: "im:message.group_at_msg:readonly", desc: "接收群聊 @消息" },
+  { scope: "im:resource", desc: "上传/下载图片与文件" },
+  { scope: "im:chat:read", desc: "获取群聊名称" },
+  { scope: "contact:user.base:readonly", desc: "获取用户名（私聊会话显示）" },
+]
+
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "general", label: "通用", icon: SettingsIcon },
   { id: "proxy", label: "网络", icon: Network },
@@ -63,9 +76,10 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "rules", label: "Rules", icon: FileCode2 },
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
+  { id: "setup", label: "帮助引导", icon: BookOpen },
 ]
 
-export default function Settings({ onBack }: Props) {
+export default function Settings({ onBack, onResetSetup }: Props) {
   const [tab, setTab] = useState<Tab>("general")
 
   const [appId, setAppId] = useState("")
@@ -990,6 +1004,79 @@ export default function Settings({ onBack }: Props) {
                     )
                   })}
                   {skillTree.length === 0 && <p className="py-4 text-center text-xs text-gray-600">暂无 Skill</p>}
+                </div>
+              </section>
+            </>)}
+
+            {/* ═══ Setup Guide ═══ */}
+            {tab === "setup" && (<>
+              <section className="space-y-4">
+                <h3 className="text-sm font-medium text-gray-300">引导 & 配置</h3>
+                <div className="rounded-lg border border-gray-700 p-4">
+                  <p className="mb-3 text-sm text-gray-400">重新执行初始化引导流程（可重新配置飞书应用凭据、主用户、工作目录等）。</p>
+                  <button
+                    onClick={async () => {
+                      await window.electronAPI.saveConfig({ setupComplete: false })
+                      onResetSetup?.()
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-blue-500"
+                  >
+                    <RotateCcw size={13} />重新进入引导
+                  </button>
+                </div>
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">飞书应用权限要求</h3>
+                <p className="text-xs text-gray-500">创建飞书自建应用后，需在「权限管理」中开通以下全部权限并发布版本后方可使用。</p>
+                <div className="overflow-hidden rounded-lg border border-gray-700">
+                  <table className="w-full text-xs">
+                    <thead><tr className="border-b border-gray-700 bg-gray-800/60 text-left text-gray-400"><th className="px-3 py-2">权限标识</th><th className="px-3 py-2">用途说明</th></tr></thead>
+                    <tbody>
+                      {REQUIRED_PERMISSIONS.map((p) => (
+                        <tr key={p.scope} className="border-b border-gray-800/50 last:border-0">
+                          <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">{p.scope}</td>
+                          <td className="px-3 py-1.5 text-gray-400">{p.desc}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <button
+                  onClick={() => {
+                    const json = JSON.stringify({ scopes: { tenant: REQUIRED_PERMISSIONS.map((p) => p.scope), user: [] } }, null, 2)
+                    navigator.clipboard.writeText(json)
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
+                >
+                  <Copy size={12} />复制权限 JSON
+                </button>
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
+                <p className="text-xs text-gray-500">在飞书开放平台「事件订阅」页面添加以下事件，并选择 <strong className="text-gray-300">应用身份</strong> 订阅类型：</p>
+                <div className="overflow-hidden rounded-lg border border-gray-700">
+                  <table className="w-full text-xs">
+                    <thead><tr className="border-b border-gray-700 bg-gray-800/60 text-left text-gray-400"><th className="px-3 py-2">事件名称</th><th className="px-3 py-2">事件标识</th><th className="px-3 py-2">说明</th></tr></thead>
+                    <tbody>
+                      <tr className="border-b border-gray-800/50">
+                        <td className="px-3 py-1.5 text-gray-300">接收消息 v2.0</td>
+                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im.message.receive_v1</td>
+                        <td className="px-3 py-1.5 text-gray-400">接收用户私聊和群聊 @机器人消息</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-xs text-gray-600">接收方式请选择「长连接」，无需配置回调 URL。</p>
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">参考文档</h3>
+                <div className="flex flex-wrap gap-2">
+                  <a href="https://github.com/lk-eternal/feishu-cursor-bridge" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1.5 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
+                    <ExternalLink size={12} />项目 GitHub
+                  </a>
                 </div>
               </section>
             </>)}

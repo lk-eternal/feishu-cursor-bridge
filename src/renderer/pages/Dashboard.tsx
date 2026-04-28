@@ -38,7 +38,7 @@ export default function Dashboard({ onSettings }: Props) {
   const [clearingQueue, setClearingQueue] = useState(false)
   const [configModel, setConfigModel] = useState("")
   const [showSessions, setShowSessions] = useState(false)
-  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string }[]>([])
+  const [sessionList, setSessionList] = useState<{ sessionKey: string; pid: number; startedAt: number; chatType: string; lastActivityAt: number; chatName?: string; workspaceDir?: string }[]>([])
   const logRef = useRef<HTMLPreElement>(null)
 
   useEffect(() => {
@@ -398,9 +398,10 @@ export default function Dashboard({ onSettings }: Props) {
             {sessionList.map((s) => (
               <div key={s.sessionKey} className="flex items-center justify-between rounded-lg bg-gray-800/60 px-3 py-2">
                 <div className="flex items-center gap-2 overflow-hidden">
-                  <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : "bg-blue-400"}`} />
+                  <span className={`h-2 w-2 rounded-full ${s.chatType === "group" ? "bg-green-400" : s.chatType === "task" ? "bg-yellow-400" : "bg-blue-400"}`} />
                   <span className="truncate text-xs text-gray-300" title={s.sessionKey}>
-                    {s.chatType === "group" ? "群聊" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
+                    {s.chatType === "group" ? "群聊" : s.chatType === "task" ? "定时" : "私聊"} {s.chatName || (s.sessionKey.length > 20 ? s.sessionKey.slice(0, 20) + "…" : s.sessionKey)}
+                    {s.workspaceDir && s.chatType === "p2p" && <span className="ml-1 text-[10px] text-gray-500" title={s.workspaceDir}>📁{s.workspaceDir.split(/[\\/]/).pop()}</span>}
                   </span>
                   <span className="text-xs text-gray-600">PID:{s.pid}</span>
                 </div>

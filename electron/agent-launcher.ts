@@ -15,6 +15,9 @@ import {
 } from "./ui-logger"
 
 export const P2P_SESSION_KEY = "__p2p__"
+export function makeMainP2pSessionKey(chatId: string, workspaceDir: string): string {
+  return `${chatId}::${workspaceDir}`
+}
 const GROUP_IDLE_TIMEOUT_MS = 30 * 60 * 1000
 const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
@@ -27,6 +30,8 @@ interface SessionAgent {
   startedAt: number
   lastActivityAt: number
   chatType: "p2p" | "group"
+  workspaceDir?: string
+  senderOpenId?: string
 }
 
 const sessionAgents = new Map<string, SessionAgent>()
@@ -38,12 +43,21 @@ export function setChatNameResolver(fn: (chatId: string) => string | undefined):
 }
 
 function broadcastSessionStatus(): void {
-  const list = [...sessionAgents.values()].map((s) => ({
-    sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
-    lastActivityAt: s.lastActivityAt, chatType: s.chatType,
-    chatName: chatNameResolver?.(s.sessionKey),
+  const sessions = [...sessionAgents.values()].map((s) => {
+    const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
+    return {
+      sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
+      lastActivityAt: s.lastActivityAt, chatType: s.chatType as string,
+      chatName: chatNameResolver?.(chatId) || (s.senderOpenId && chatNameResolver?.(s.senderOpenId)),
+      workspaceDir: s.workspaceDir,
+    }
+  })
+  const tasks = [...independentAgents.values()].map((a) => ({
+    sessionKey: `task::${a.taskId}`, pid: a.pid, startedAt: a.startedAt,
+    lastActivityAt: a.startedAt, chatType: "task" as string,
+    chatName: a.taskName,
   }))
-  broadcastSessionStatusToUi(list)
+  broadcastSessionStatusToUi([...sessions, ...tasks])
 }
 
 // ── 独立任务 Agent ──────────────────────────────────────
@@ -89,6 +103,7 @@ export function getSessionAgentList() {
   return [...sessionAgents.values()].map((s) => ({
     sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
     chatType: s.chatType, lastActivityAt: s.lastActivityAt,
+    workspaceDir: s.workspaceDir, senderOpenId: s.senderOpenId,
   }))
 }
 
@@ -152,7 +167,7 @@ function buildAgentLaunchArgs(config: AppConfig, prompt: string, resumeChatId: s
   return args
 }
 
-function getMainChatId(config: AppConfig): string {
+export function getMainChatId(config: AppConfig): string {
   return (config.mainChatIds ?? {})[config.workspaceDir]?.trim() || ""
 }
 
@@ -222,6 +237,7 @@ export function launchSessionAgent(
   injectWorkspaceFn?: (dir: string) => boolean,
   meta?: LaunchMeta,
   useMainWorkspace?: boolean,
+  senderOpenId?: string,
 ): { ok: boolean; error?: string } {
   if (isSessionAgentRunning(sessionKey)) {
     sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
@@ -275,7 +291,7 @@ export function launchSessionAgent(
       broadcastSessionStatus()
     })
 
-    sessionAgents.set(sessionKey, { sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(), chatType })
+    sessionAgents.set(sessionKey, { sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(), chatType, workspaceDir: workDir, senderOpenId })
     broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 已启动, pid=${child.pid}`)
     broadcastSessionStatus()
     return { ok: true }

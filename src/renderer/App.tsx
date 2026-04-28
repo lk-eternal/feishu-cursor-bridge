@@ -13,6 +13,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
+  const [wasSetupDone, setWasSetupDone] = useState(false)
 
   useEffect(() => {
     if (!window.electronAPI) {
@@ -23,7 +24,10 @@ export default function App() {
     window.electronAPI
       .getConfig()
       .then((config) => {
-        if (config.setupComplete) setPage("dashboard")
+        if (config.setupComplete) {
+          setPage("dashboard")
+          setWasSetupDone(true)
+        }
         setLoading(false)
       })
       .catch((e: unknown) => {
@@ -63,7 +67,7 @@ export default function App() {
   if (page === "setup") {
     return (
       <>
-        <Setup onComplete={() => setPage("dashboard")} />
+        <Setup onComplete={() => { setWasSetupDone(true); setPage("dashboard") }} onExit={wasSetupDone ? () => setPage("dashboard") : undefined} />
         <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
         <AppModalHost />
         <UpdateDownloadBanner />
@@ -77,7 +81,7 @@ export default function App() {
         <Dashboard onSettings={() => setPage("settings")} />
       </div>
       <div className={page === "settings" ? undefined : "hidden"}>
-        <Settings onBack={() => setPage("dashboard")} />
+        <Settings onBack={() => setPage("dashboard")} onResetSetup={() => setPage("setup")} />
       </div>
       <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
       <AppModalHost />
