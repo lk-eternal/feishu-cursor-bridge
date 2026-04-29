@@ -455,6 +455,8 @@ const AGENT_STALE_TIMEOUT_MS = 10 * 60 * 1000
 let queueStaleStartTime: number | null = null
 
 let powerSaveBlockerId: number | null = null
+let sseReq: http.ClientRequest | null = null
+let sseDispatchDebounce: NodeJS.Timeout | null = null
 
 function startDaemonPowerSaveBlock(): void {
   stopDaemonPowerSaveBlock()
@@ -472,10 +474,49 @@ function stopDaemonPowerSaveBlock(): void {
   }
 }
 
+function connectSseQueueEvents(): void {
+  disconnectSseQueueEvents()
+  const lock = readLockFile()
+  if (!lock?.port) return
+  const url = `http://127.0.0.1:${lock.port}/api/queue-events`
+  let buf = ""
+  sseReq = http.get(url, { timeout: 0 }, (res) => {
+    res.on("data", (chunk: Buffer) => {
+      buf += chunk.toString()
+      const lines = buf.split("\n")
+      buf = lines.pop() ?? ""
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue
+        try {
+          const ev = JSON.parse(line.slice(6))
+          if (ev.type === "queue-update") {
+            if (sseDispatchDebounce) clearTimeout(sseDispatchDebounce)
+            sseDispatchDebounce = setTimeout(() => dispatchSessionAgents().catch(() => {}), 300)
+          }
+        } catch { /* ignore */ }
+      }
+    })
+    res.on("end", () => {
+      sseReq = null
+      setTimeout(() => connectSseQueueEvents(), 3_000)
+    })
+  })
+  sseReq.on("error", () => {
+    sseReq = null
+    setTimeout(() => connectSseQueueEvents(), 5_000)
+  })
+}
+
+function disconnectSseQueueEvents(): void {
+  if (sseDispatchDebounce) { clearTimeout(sseDispatchDebounce); sseDispatchDebounce = null }
+  if (sseReq) { try { sseReq.destroy() } catch { /* */ }; sseReq = null }
+}
+
 function startStatusPolling(): void {
   stopStatusPolling()
   queueStaleStartTime = null
   startDaemonPowerSaveBlock()
+  connectSseQueueEvents()
   statusInterval = setInterval(async () => {
     try {
       const status = await getDaemonStatus()
@@ -520,6 +561,7 @@ function startStatusPolling(): void {
 }
 
 function stopStatusPolling(): void {
+  disconnectSseQueueEvents()
   if (statusInterval) {
     clearInterval(statusInterval)
     statusInterval = null
@@ -595,22 +637,19 @@ async function pullMergedMessagesFromQueue(chatId?: string): Promise<MergedMessa
   }
 }
 
-async function getQueueChats(): Promise<{ chatId: string; chatType: string }[]> {
+async function getQueueChats(): Promise<{ chatId: string; chatType: string; senderOpenId?: string }[]> {
   const lock = readLockFile()
   if (!lock?.port) return []
   try {
-    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: { chatId: string; chatType: string }[] } | null
+    const res = (await httpGet(`http://127.0.0.1:${lock.port}/queue-chat-ids`)) as { chats?: { chatId: string; chatType: string; senderOpenId?: string }[] } | null
     return res?.chats ?? []
   } catch {
     return []
   }
 }
 
-function bundledToMeta(b: MergedMessages): import("./agent-launcher").LaunchMeta {
-  return { messageIds: b.messageIds, chatId: b.chatId, chatType: b.chatType }
-}
 
-function isMainUser(_senderOpenId?: string, chatId?: string, chatType?: string): boolean {
+function isMainUser(chatId?: string, chatType?: string): boolean {
   if (chatType !== "p2p") return false
   const rid = getConfig().larkReceiveId?.trim()
   return !!rid && chatId === rid
@@ -624,35 +663,29 @@ async function dispatchSessionAgents(): Promise<void> {
   const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
   if (groupChatIds.length > 0) await fetchChatNames(groupChatIds)
 
-  for (const { chatId, chatType } of chats) {
-    const bundled = await pullMergedMessagesFromQueue(chatId)
-    if (!bundled) continue
-
-    const meta = bundledToMeta(bundled)
-    const mainUser = isMainUser(bundled.senderOpenId, chatId, chatType)
-    const useMainWorkspace = mainUser && chatType === "p2p"
-
-    if (chatType === "p2p" && bundled.senderOpenId && !chatNameCache.has(bundled.senderOpenId)) {
-      await fetchUserNames([bundled.senderOpenId])
-    }
-
-    const sessionKey = useMainWorkspace
+  for (const { chatId, chatType, senderOpenId } of chats) {
+    const mainUser = isMainUser(chatId, chatType)
+    const sessionKey = mainUser
       ? makeMainP2pSessionKey(chatId, config.workspaceDir)
       : chatId
 
-    if (_isSessionAgentRunning(sessionKey)) {
-      continue
+    if (_isSessionAgentRunning(sessionKey)) continue
+
+    if (chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
+      await fetchUserNames([senderOpenId])
     }
+
     await new Promise((r) => setTimeout(r, 500))
 
-    const userName = bundled.senderOpenId ? chatNameCache.get(bundled.senderOpenId) : undefined
+    const userName = senderOpenId ? chatNameCache.get(senderOpenId) : undefined
     const chatName = chatNameCache.get(chatId) || userName
     const label = chatType === "group"
       ? `群聊 ${chatName ? `「${chatName}」` : chatId}`
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
-    broadcastLog(`[Agent] ${label} 有 ${bundled.count} 条消息，自动拉起${useMainWorkspace ? "(主工作目录)" : ""}`)
+    broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
 
-    const result = launchSessionAgent(sessionKey, chatType as "p2p" | "group", bundled.text, meta, useMainWorkspace, bundled.senderOpenId)
+    const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
+    const result = launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)
     if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
   }
 }
@@ -865,10 +898,10 @@ export type AgentLoginStatus = {
 
 export const checkAgentLoggedIn = _checkAgentLoggedIn
 export const stopAgent = _stopAgent
-export const launchAgent = (initialMessage?: string) =>
-  launchSessionAgent(P2P_SESSION_KEY, "p2p", initialMessage, undefined, true)
-export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", initialMessage?: string, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean, senderOpenId?: string) => { ok: boolean; error?: string } =
-  (sessionKey, chatType, initialMessage, meta, useMainWorkspace, senderOpenId) => _launchSessionAgent(sessionKey, chatType, initialMessage, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
+export const launchAgent = () =>
+  launchSessionAgent(P2P_SESSION_KEY, "p2p", undefined, undefined, true)
+export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", injectWorkspaceFn?: (dir: string) => boolean, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean, senderOpenId?: string) => { ok: boolean; error?: string } =
+  (sessionKey, chatType, _injectFn, meta, useMainWorkspace, senderOpenId) => _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
 export const stopSessionAgent = _stopSessionAgent
 export const stopAllSessionAgents = _stopAllSessionAgents
 export function getSessionAgentList() {
@@ -1527,7 +1560,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
     const rawCmd = claimed.command.trim()
     const cmdTokens = rawCmd.split(/\s+/).filter((t) => t.length > 0)
     const head = (cmdTokens[0] ?? "").toLowerCase()
-    const isAdmin = isMainUser(undefined, claimed.chatId, claimed.chatType)
+    const isAdmin = isMainUser(claimed.chatId, claimed.chatType)
     const reply = (ok: boolean, msg: string) => reportCommandResult(lock.port, claimed!.messageId, ok, msg)
     const denyNonAdmin = () => reply(false, "🔒 该指令仅管理员可用")
 

@@ -138,20 +138,20 @@ export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?:
 function buildMetaBlock(meta?: LaunchMeta): string {
   if (!meta) return ""
   const parts: string[] = []
-  if (meta.messageIds?.length) parts.push(`[message_ids=${meta.messageIds.join(",")}]`)
   if (meta.chatId) parts.push(`[chat_id=${meta.chatId}]`)
   if (meta.chatType) parts.push(`[chat_type=${meta.chatType}]`)
   return parts.length ? `\n\n---\n消息元数据:\n${parts.join("\n")}` : ""
 }
 
-function buildPrompt(initialMessage?: string, meta?: LaunchMeta): string {
+function buildPrompt(meta?: LaunchMeta): string {
   const ruleRef = "请按照digital-identity数字身份定义并遵守飞书工作流规则feishu-cursor-bridge开始工作"
-  const chatLabel = meta?.chatType === "group" ? "[群聊会话]" : "[私聊会话]"
-  if (!initialMessage) {
-    return `${ruleRef},${chatLabel} 先获取待处理的飞书消息，然后根据消息内容开始工作。`
-  }
   const metaBlock = buildMetaBlock(meta)
-  return `${ruleRef},以下是待处理的消息：\n\n${chatLabel}\n${initialMessage}${metaBlock}`
+  return [
+    ruleRef,
+    "如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。",
+    "否则，请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。",
+    metaBlock,
+  ].join("\n")
 }
 
 // ── 进程管理工具 ─────────────────────────────────────────
@@ -240,7 +240,6 @@ function attachStreamLoggers(child: ChildProcess): void {
 export function launchSessionAgent(
   sessionKey: string,
   chatType: "p2p" | "group",
-  initialMessage?: string,
   injectWorkspaceFn?: (dir: string) => boolean,
   meta?: LaunchMeta,
   useMainWorkspace?: boolean,
@@ -269,7 +268,7 @@ export function launchSessionAgent(
   if (!workDir) return { ok: false, error: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
 
-  const prompt = buildPrompt(initialMessage, meta)
+  const prompt = buildPrompt(meta)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
   const overrideConfig = { ...config, workspaceDir: workDir }
 

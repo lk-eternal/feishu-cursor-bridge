@@ -111,7 +111,8 @@ mcpServer.tool(
       if (message) {
         await httpJson(daemonUrl("/api/send-text"), { text: message, message_id, chat_id });
       }
-      const timeoutMs = (timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0;
+      const MAX_POLL_MS = 25_000;
+      const timeoutMs = Math.min((timeout_seconds && timeout_seconds > 0) ? timeout_seconds * 1000 : 0, MAX_POLL_MS);
       if (timeoutMs > 0) {
         const reply = await pollDaemon(timeoutMs, chat_id);
         if (reply === null) return { content: [{ type: "text" as const, text: "[waiting]" }] };

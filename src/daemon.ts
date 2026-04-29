@@ -86,6 +86,17 @@ function log(level: string, ...args: unknown[]): void {
 const larkClient = createLarkClient(APP_ID, APP_SECRET);
 const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
 
+// ── SSE 客户端管理 ───────────────────────────────────────
+
+const sseClients = new Set<http.ServerResponse>();
+
+function broadcastQueueEvent(chatId?: string): void {
+  const data = JSON.stringify({ type: "queue-update", chatId: chatId ?? null, ts: Date.now() });
+  for (const res of sseClients) {
+    try { res.write(`data: ${data}\n\n`); } catch { sseClients.delete(res); }
+  }
+}
+
 // ── 文件队列 ─────────────────────────────────────────────
 
 function initQueue(): void {
@@ -102,6 +113,7 @@ function pushMessage(content: string, messageId?: string, chatId?: string, chatT
   const written = pushToFileQueue(content, messageId, `daemon-${process.pid}`, chatId, chatType, senderOpenId);
   if (written) {
     log("INFO", `消息已写入共享队列: ${JSON.stringify(content)} (id=${messageId ?? "none"}, chat=${chatId ?? "none"})`);
+    broadcastQueueEvent(chatId);
   } else {
     log("INFO", `消息已跳过（重复或写入失败）: id=${messageId ?? "none"}`);
   }
@@ -787,6 +799,20 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
       return true;
     }
     json(res, { message: msg });
+    return true;
+  }
+
+  // ── SSE 队列事件流 ──
+  if (pathname === "/api/queue-events" && method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    });
+    res.write(`data: ${JSON.stringify({ type: "connected", ts: Date.now() })}\n\n`);
+    sseClients.add(res);
+    req.on("close", () => { sseClients.delete(res); });
     return true;
   }
 

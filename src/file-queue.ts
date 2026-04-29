@@ -170,9 +170,9 @@ export function getQueueMessages(): { index: number; preview: string; chatId?: s
   }
 }
 
-export function getDistinctChatIds(): { chatId: string; chatType: string }[] {
+export function getDistinctChatIds(): { chatId: string; chatType: string; senderOpenId?: string }[] {
   if (!queueDir) return [];
-  const map = new Map<string, string>();
+  const map = new Map<string, { chatType: string; senderOpenId?: string }>();
   try {
     const files = fs.readdirSync(queueDir).filter((f) => f.endsWith(".qmsg"));
     for (const f of files) {
@@ -180,12 +180,12 @@ export function getDistinctChatIds(): { chatId: string; chatType: string }[] {
         const raw = fs.readFileSync(path.join(queueDir, f), "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed.chatId && !map.has(parsed.chatId)) {
-          map.set(parsed.chatId, parsed.chatType || "p2p");
+          map.set(parsed.chatId, { chatType: parsed.chatType || "p2p", senderOpenId: parsed.senderOpenId || undefined });
         }
       } catch { /* ignore */ }
     }
   } catch { /* ignore */ }
-  return [...map.entries()].map(([chatId, chatType]) => ({ chatId, chatType }));
+  return [...map.entries()].map(([chatId, v]) => ({ chatId, chatType: v.chatType, senderOpenId: v.senderOpenId }));
 }
 
 export function cleanupStaleMessages(): void {
