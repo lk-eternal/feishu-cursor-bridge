@@ -1,5 +1,20 @@
 [
   {
+    "version": "3.1.0",
+    "date": "2026-04-29",
+    "changes": [
+      "新增: SSE 实时通知 — daemon 新增 /sse 端点, Agent 调度从 5s 轮询升级为实时事件推送",
+      "新增: Agent 启动策略优化 — 不再注入首条用户消息, 改由 Agent 通过 MCP 主动拉取, 避免重启后重复消费",
+      "新增: 群消息精确过滤 — 启动时获取机器人 open_id, 仅处理 @机器人 的群消息",
+      "修复: 消息丢失 — Agent 运行中新消息被提前出队导致丢失, 现先检查 Agent 状态再出队",
+      "修复: 重复发消息 — sync_message 超时导致 Agent 反复重发, 现限制 pollDaemon 超时上限为 25s",
+      "修复: 消息元数据丢失 — daemon 断连重入队时丢失 messageId/chatId/chatType 等元数据",
+      "修复: messageId 回复错乱 — 强化规则要求 Agent 使用最新 messageId 回复",
+      "优化: MCP 注入逻辑精简 — 移除冗余的 includeAdmin 参数, 减少不必要的 auto-enable 日志",
+      "优化: 保活协议模板 — 新增飞书异步长连接规则, 定义完整的 ACK/SYNC/ANCHOR/KEEP-ALIVE 状态机"
+    ]
+  },
+  {
     "version": "3.0.0",
     "date": "2026-04-24",
     "changes": [

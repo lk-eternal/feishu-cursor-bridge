@@ -16,7 +16,6 @@ import {
   claimNextMessage,
   claimNextMessageText,
   pollFileQueueBatch,
-  pollFileQueueBatchText,
   getQueueLength as getFileQueueLength,
   getQueueMessages as getFileQueueMessages,
   getDistinctChatIds,
@@ -85,6 +84,7 @@ function log(level: string, ...args: unknown[]): void {
 
 const larkClient = createLarkClient(APP_ID, APP_SECRET);
 const sender = new LarkSender({ client: larkClient, receiveId: RECEIVE_ID, receiveIdType: RECEIVE_ID_TYPE, messagePrefix: MESSAGE_PREFIX, log });
+let botOpenId: string | undefined;
 
 // ── SSE 客户端管理 ───────────────────────────────────────
 
@@ -153,7 +153,8 @@ function tryCaptureBind(chatType: string, chatId: string, senderOpenId?: string)
 // ── 飞书 WebSocket 长连接 ────────────────────────────────
 
 function isBotMentioned(ev: LarkMessageEvent): boolean {
-  return ev.mentions.some((m) => m.name === "" || m.key === "@_all" || m.id === "");
+  if (!botOpenId) return ev.mentions.length > 0;
+  return ev.mentions.some((m) => m.id === botOpenId || m.key === "@_all");
 }
 
 function stripMentionTags(text: string): string {
@@ -171,7 +172,7 @@ function startLarkConnection(): void {
       log("INFO", `自动识别用户 open_id: ${senderOpenId}`);
     }
 
-    if (chatType === "group" && mentions.length === 0) {
+    if (chatType === "group" && !isBotMentioned(ev)) {
       return;
     }
 
@@ -491,13 +492,13 @@ function startHttpServer(): Promise<number> {
           const chatIdFilter = reqUrl.searchParams.get("chatId") || undefined;
           let disconnected = false;
           req.on("close", () => { disconnected = true; });
-          const reply = await pollFileQueueBatchText(timeout, undefined, chatIdFilter);
-          if (disconnected && reply !== null) {
-            pushToFileQueue(reply);
+          const msg = await pollFileQueueBatch(timeout, undefined, chatIdFilter);
+          if (disconnected && msg !== null) {
+            pushToFileQueue(msg.text, msg.messageId, `requeue-poll`, msg.chatId, msg.chatType, msg.senderOpenId);
             log("WARN", `/poll 连接断开，消息放回队列`);
             return;
           }
-          json(res, { message: reply, hasMore: getFileQueueLength() > 0 });
+          json(res, { message: msg?.text ?? null, hasMore: getFileQueueLength() > 0 });
           return;
         }
 
@@ -794,7 +795,7 @@ async function handleAdminApi(pathname: string, method: string, req: http.Incomi
     req.on("close", () => { disconnected = true; });
     const msg = await pollFileQueueBatch(timeout, undefined, chatIdFilter);
     if (disconnected && msg !== null) {
-      pushToFileQueue(msg.text);
+      pushToFileQueue(msg.text, msg.messageId, `requeue-poll-message`, msg.chatId, msg.chatType, msg.senderOpenId);
       json(res, { message: null });
       return true;
     }
@@ -946,6 +947,16 @@ export async function daemonMain(): Promise<void> {
   process.on("exit", removeLockFile);
 
   initQueue();
+
+  try {
+    const botInfo = await larkClient.request({ method: "GET", url: "/open-apis/bot/v3/info" }) as any;
+    botOpenId = botInfo?.bot?.open_id;
+    if (botOpenId) log("INFO", `机器人 open_id: ${botOpenId}`);
+    else log("WARN", "未能获取机器人 open_id，群消息过滤将使用宽松模式");
+  } catch (e: any) {
+    log("WARN", `获取机器人信息失败: ${e?.message ?? e}`);
+  }
+
   await sender.resolveTarget(RECEIVE_ID, RECEIVE_ID_TYPE);
   startLarkConnection();
 
