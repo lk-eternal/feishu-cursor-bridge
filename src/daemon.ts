@@ -192,6 +192,7 @@ const COMMANDS: Record<string, string> = {
   "/status": "查看 Agent / Daemon 状态",
   "/list": "查看消息队列列表（不消费）",
   "/task": "定时任务（/task 查看子命令说明；如 /task ls）",
+  "/run": "启动临时独立 Agent（/run <任务描述>）",
   "/model": "Cursor CLI 模型（/model ls | info | set <序号>）",
   "/mcp": "MCP 服务器管理（/mcp ls | info | enable | disable | delete | add）",
   "/workspace": "切换工作目录（/workspace 查看当前 | /workspace set <路径>）",

@@ -14,6 +14,8 @@ export default function App() {
   const [error, setError] = useState("")
   const [closeConfirmOpen, setCloseConfirmOpen] = useState(false)
   const [wasSetupDone, setWasSetupDone] = useState(false)
+  const [setupFrom, setSetupFrom] = useState<"init" | "settings">("init")
+  const [settingsInitTab, setSettingsInitTab] = useState<string | undefined>()
 
   useEffect(() => {
     if (!window.electronAPI) {
@@ -67,7 +69,17 @@ export default function App() {
   if (page === "setup") {
     return (
       <>
-        <Setup onComplete={() => { setWasSetupDone(true); setPage("dashboard") }} onExit={wasSetupDone ? () => setPage("dashboard") : undefined} />
+        <Setup
+          onComplete={() => { setWasSetupDone(true); setPage("dashboard") }}
+          onExit={wasSetupDone ? () => {
+            if (setupFrom === "settings") {
+              setSettingsInitTab("setup")
+              setPage("settings")
+            } else {
+              setPage("dashboard")
+            }
+          } : undefined}
+        />
         <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
         <AppModalHost />
         <UpdateDownloadBanner />
@@ -81,7 +93,12 @@ export default function App() {
         <Dashboard onSettings={() => setPage("settings")} />
       </div>
       <div className={page === "settings" ? undefined : "hidden"}>
-        <Settings onBack={() => setPage("dashboard")} onResetSetup={() => setPage("setup")} />
+        <Settings
+          onBack={() => setPage("dashboard")}
+          onResetSetup={() => { setSetupFrom("settings"); setPage("setup") }}
+          initialTab={settingsInitTab}
+          onTabConsumed={() => setSettingsInitTab(undefined)}
+        />
       </div>
       <CloseWindowModal open={closeConfirmOpen} onClose={() => setCloseConfirmOpen(false)} />
       <AppModalHost />

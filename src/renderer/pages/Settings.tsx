@@ -41,7 +41,7 @@ import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
 import TitleBar from "../components/TitleBar"
 import useInlineModal from "../components/useInlineModal"
 
-interface Props { onBack: () => void; onResetSetup?: () => void }
+interface Props { onBack: () => void; onResetSetup?: () => void; initialTab?: string; onTabConsumed?: () => void }
 
 type IdType = "open_id" | "user_id" | "chat_id"
 type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup"
@@ -65,7 +65,7 @@ const REQUIRED_PERMISSIONS: { scope: string; desc: string }[] = [
   { scope: "im:message.group_at_msg:readonly", desc: "接收群聊 @消息" },
   { scope: "im:resource", desc: "上传/下载图片与文件" },
   { scope: "im:chat:read", desc: "获取群聊名称" },
-  { scope: "contact:user.base:readonly", desc: "获取用户名（私聊会话显示）" },
+  { scope: "contact:contact.base:readonly", desc: "获取用户名（私聊会话显示）" },
 ]
 
 const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
@@ -79,8 +79,15 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "setup", label: "帮助引导", icon: BookOpen },
 ]
 
-export default function Settings({ onBack, onResetSetup }: Props) {
-  const [tab, setTab] = useState<Tab>("general")
+export default function Settings({ onBack, onResetSetup, initialTab, onTabConsumed }: Props) {
+  const [tab, setTab] = useState<Tab>((initialTab as Tab) || "general")
+
+  useEffect(() => {
+    if (initialTab) {
+      setTab(initialTab as Tab)
+      onTabConsumed?.()
+    }
+  }, [initialTab, onTabConsumed])
 
   const [appId, setAppId] = useState("")
   const [appSecret, setAppSecret] = useState("")
@@ -1031,42 +1038,38 @@ export default function Settings({ onBack, onResetSetup }: Props) {
                 </div>
               </section>
 
-              <section className="space-y-3">
+              <section className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-gray-300">飞书应用权限要求</h3>
-                  {appId.trim() && (
-                    <a href={`https://open.feishu.cn/app/${appId.trim()}/auth`} target="_blank" rel="noreferrer"
-                      className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
-                      <ExternalLink size={12} />前往设置权限
-                    </a>
-                  )}
+                  <h3 className="text-sm font-medium text-gray-300">应用权限</h3>
+                  <div className="flex items-center gap-2">
+                    {appId.trim() && (
+                      <a href={`https://open.feishu.cn/app/${appId.trim()}/auth`} target="_blank" rel="noreferrer"
+                        className="flex items-center gap-1 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-blue-400">
+                        <ExternalLink size={12} />前往设置权限
+                      </a>
+                    )}
+                    <button
+                      onClick={() => {
+                        const json = JSON.stringify({ scopes: { tenant: REQUIRED_PERMISSIONS.map((p) => p.scope), user: [] } }, null, 2)
+                        navigator.clipboard.writeText(json)
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
+                    >
+                      <Copy size={12} />复制权限 JSON
+                    </button>
+                  </div>
                 </div>
-                <p className="text-xs text-gray-500">创建飞书自建应用后，需在「权限管理」中开通以下全部权限并发布版本后方可使用。</p>
-                <div className="overflow-hidden rounded-lg border border-gray-700">
-                  <table className="w-full text-xs">
-                    <thead><tr className="border-b border-gray-700 bg-gray-800/60 text-left text-gray-400"><th className="px-3 py-2">权限标识</th><th className="px-3 py-2">用途说明</th></tr></thead>
-                    <tbody>
-                      {REQUIRED_PERMISSIONS.map((p) => (
-                        <tr key={p.scope} className="border-b border-gray-800/50 last:border-0">
-                          <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">{p.scope}</td>
-                          <td className="px-3 py-1.5 text-gray-400">{p.desc}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                  {REQUIRED_PERMISSIONS.map((p) => (
+                    <div key={p.scope} className="flex items-center justify-between px-3 py-2">
+                      <code className="text-xs text-blue-400">{p.scope}</code>
+                      <span className="text-xs text-gray-500">{p.desc}</span>
+                    </div>
+                  ))}
                 </div>
-                <button
-                  onClick={() => {
-                    const json = JSON.stringify({ scopes: { tenant: REQUIRED_PERMISSIONS.map((p) => p.scope), user: [] } }, null, 2)
-                    navigator.clipboard.writeText(json)
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-2.5 py-1 text-xs text-gray-400 transition hover:bg-gray-800 hover:text-white"
-                >
-                  <Copy size={12} />复制权限 JSON
-                </button>
               </section>
 
-              <section className="space-y-3">
+              <section className="space-y-2">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-medium text-gray-300">事件订阅</h3>
                   {appId.trim() && (
@@ -1076,30 +1079,24 @@ export default function Settings({ onBack, onResetSetup }: Props) {
                     </a>
                   )}
                 </div>
-                <p className="text-xs text-gray-500">在飞书开放平台「事件订阅」页面添加以下事件，并选择 <strong className="text-gray-300">应用身份</strong> 订阅类型：</p>
-                <div className="overflow-hidden rounded-lg border border-gray-700">
-                  <table className="w-full text-xs">
-                    <thead><tr className="border-b border-gray-700 bg-gray-800/60 text-left text-gray-400"><th className="px-3 py-2">事件名称</th><th className="px-3 py-2">事件标识</th><th className="px-3 py-2">说明</th></tr></thead>
-                    <tbody>
-                      <tr className="border-b border-gray-800/50">
-                        <td className="px-3 py-1.5 text-gray-300">接收消息 v2.0</td>
-                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im.message.receive_v1</td>
-                        <td className="px-3 py-1.5 text-gray-400">事件回调入口</td>
-                      </tr>
-                      <tr className="border-b border-gray-800/50">
-                        <td className="px-3 py-1.5 text-gray-300">读取用户发给机器人的单聊消息</td>
-                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im:message</td>
-                        <td className="px-3 py-1.5 text-emerald-400">需开通</td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-1.5 text-gray-300">获取群组中用户@机器人消息</td>
-                        <td className="whitespace-nowrap px-3 py-1.5 font-mono text-blue-400">im:message.group_at_msg</td>
-                        <td className="px-3 py-1.5 text-emerald-400">需开通</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                <div className="rounded-lg border border-gray-800 divide-y divide-gray-800">
+                  <div className="px-3 py-2 flex items-center justify-between">
+                    <code className="text-xs text-blue-400">im.message.receive_v1</code>
+                    <span className="text-xs text-gray-500">接收消息 v2.0</span>
+                  </div>
+                  <div className="px-3 py-2 flex items-center justify-between">
+                    <span className="text-xs text-gray-300">读取用户发给机器人的单聊消息</span>
+                    <span className="text-xs text-emerald-400">需开通</span>
+                  </div>
+                  <div className="px-3 py-2 flex items-center justify-between">
+                    <span className="text-xs text-gray-300">获取群组中用户@机器人消息</span>
+                    <span className="text-xs text-emerald-400">需开通</span>
+                  </div>
+                  <div className="px-3 py-2 text-xs text-gray-500 space-y-1">
+                    <div>订阅方式：<span className="text-gray-300">应用身份</span></div>
+                    <div>回调类型：<span className="text-gray-300">长连接（WebSocket）</span></div>
+                  </div>
                 </div>
-                <p className="text-xs text-gray-600">接收方式请选择「长连接」，无需配置回调 URL。</p>
               </section>
 
               <section className="space-y-3">

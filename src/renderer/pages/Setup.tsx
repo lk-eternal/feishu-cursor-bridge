@@ -679,9 +679,9 @@ export default function Setup({ onComplete, onExit }: Props) {
           )}
         </div>
 
-        {step < totalSteps - 1 && (
+        {step < totalSteps - 1 ? (
           <div className="flex items-center gap-2">
-            {step > 0 && step < totalSteps - 1 && (
+            {step > 0 && (
               <button onClick={skip} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
                 <SkipForward size={14} />跳过
               </button>
@@ -694,6 +694,10 @@ export default function Setup({ onComplete, onExit }: Props) {
               下一步<ChevronRight size={16} />
             </button>
           </div>
+        ) : !launching && launchSteps.length === 0 && (
+          <button onClick={onComplete} className="flex items-center gap-1 rounded-lg px-3 py-2 text-sm text-gray-500 transition hover:text-gray-300">
+            <SkipForward size={14} />跳过
+          </button>
         )}
       </div>
       {ModalPortal}

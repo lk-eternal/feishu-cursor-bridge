@@ -23,7 +23,7 @@ import {
   getRunningSessionCount as _getRunningSessionCount,
   checkAgentLoggedIn as _checkAgentLoggedIn, loginCli as _loginCli,
   reapIdleGroupAgents as _reapIdleGroupAgents,
-  getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
+  getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses, getIndependentAgentList,
   P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId as _getMainChatId,
   setChatNameResolver as _setChatNameResolver,
 } from "./agent-launcher"
@@ -769,14 +769,31 @@ function enableMcpServersAsync(wsDir: string, serverNames: string[]): void {
   const config = getConfig()
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
-  for (const name of serverNames) {
-    spawnAsync(["mcp", "enable", name], wsDir, env).then((r) => {
-      const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
-      broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
-    }).catch((e: unknown) => {
-      broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
-    })
-  }
+  ;(async () => {
+    let needEnable: string[]
+    try {
+      const r = await spawnAsync(["mcp", "list"], wsDir, env)
+      const clean = r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
+      const enabledSet = new Set<string>()
+      for (const line of clean.split("\n")) {
+        const m = line.match(/^(.+?):\s+(.+)$/)
+        if (m && isEnabledStatus(m[2].trim())) enabledSet.add(m[1].trim())
+      }
+      needEnable = serverNames.filter((n) => !enabledSet.has(n))
+      if (needEnable.length === 0) return
+    } catch {
+      needEnable = serverNames
+    }
+    for (const name of needEnable) {
+      try {
+        const r = await spawnAsync(["mcp", "enable", name], wsDir, env)
+        const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
+        broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
+      } catch (e: unknown) {
+        broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
+      }
+    }
+  })()
 }
 
 function injectRulesToDir(wsDir: string): boolean {
@@ -855,10 +872,12 @@ export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group",
 export const stopSessionAgent = _stopSessionAgent
 export const stopAllSessionAgents = _stopAllSessionAgents
 export function getSessionAgentList() {
-  return _getSessionAgentList().map((s) => {
+  const sessions = _getSessionAgentList().map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
-    return { ...s, chatName: chatNameCache.get(chatId) }
+    const chatName = chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
+    return { ...s, chatName }
   })
+  return [...sessions, ...getIndependentAgentList()]
 }
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
@@ -1564,6 +1583,21 @@ async function checkAndExecutePendingCommands(): Promise<void> {
           break
         }
 
+        case "/run": {
+          if (!isAdmin) { await denyNonAdmin(); break }
+          const runMsg = cmdTokens.slice(1).join(" ").trim()
+          if (!runMsg) {
+            await reply(false, "💡 用法：/run <任务描述>\n例如：/run 帮我检查一下服务器状态")
+            break
+          }
+          const taskId = `temp-${Date.now()}`
+          const result = _launchIndependentAgent(taskId, "临时会话", runMsg)
+          await reply(result.ok, result.ok
+            ? `🚀 临时 Agent 已启动 (id=${taskId})`
+            : `❌ 启动失败: ${result.error ?? "未知错误"}`)
+          break
+        }
+
         case "/model": {
           if (!isAdmin) { await denyNonAdmin(); break }
           await handleFeishuModelCommand(lock.port, claimed.messageId, rawCmd)
@@ -1649,6 +1683,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             "🔹 /list 消息队列",
             "🔹 /clean 清空队列",
             "🔹 /task 定时任务",
+            "🔹 /run 临时独立会话",
             "🔹 /model 模型设置",
             "🔹 /mcp MCP服务器管理",
             "🔹 /workspace 切换工作目录",

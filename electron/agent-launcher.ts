@@ -124,6 +124,13 @@ export function getIndependentTaskStatuses(): Record<string, { running: boolean;
   return statuses
 }
 
+export function getIndependentAgentList() {
+  return [...independentAgents.values()].map((a) => ({
+    sessionKey: `task::${a.taskId}`, pid: a.pid, startedAt: a.startedAt,
+    lastActivityAt: a.startedAt, chatType: "task" as string, chatName: a.taskName,
+  }))
+}
+
 // ── Prompt 构建 ──────────────────────────────────────────
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
