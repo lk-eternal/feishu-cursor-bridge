@@ -657,7 +657,7 @@ function isMainUser(chatId?: string, chatType?: string): boolean {
 
 async function dispatchSessionAgents(): Promise<void> {
   const config = getConfig()
-  if (config.workspaceDir) injectMcpToDir(config.workspaceDir, true)
+  if (config.workspaceDir) injectMcpToDir(config.workspaceDir)
   const chats = await getQueueChats()
 
   const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
@@ -752,26 +752,18 @@ export const getLogBuffer = _getLogBuffer
  */
 const injectedMcpHashes = new Map<string, string>()
 
-function buildMcpServers(includeAdmin: boolean): Record<string, unknown> {
+function buildMcpServers(): Record<string, unknown> {
   if (!cachedPort) return {}
   const env: Record<string, string> = { LARK_DAEMON_PORT: String(cachedPort) }
-
-  const servers: Record<string, unknown> = {
+  return {
     "feishu-cursor-bridge": { command: "node", args: [getMcpServerPath()], env },
+    "feishu-cursor-bridge-admin": { command: "node", args: [getAdminMcpPath()], env },
   }
-  if (includeAdmin) {
-    servers["feishu-cursor-bridge-admin"] = {
-      command: "node",
-      args: [getAdminMcpPath()],
-      env,
-    }
-  }
-  return servers
 }
 
-function injectMcpToDir(wsDir: string, includeAdmin = false): boolean {
+function injectMcpToDir(wsDir: string): boolean {
   try {
-    const newServers = buildMcpServers(includeAdmin)
+    const newServers = buildMcpServers()
     const hash = JSON.stringify(newServers)
     if (injectedMcpHashes.get(wsDir) === hash) return true
 
@@ -871,7 +863,7 @@ function injectRulesToDir(wsDir: string): boolean {
 export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean } {
   const config = getConfig()
   if (!config.workspaceDir) return { mcpOk: false, ruleOk: false }
-  const mcpOk = injectMcpToDir(config.workspaceDir, true)
+  const mcpOk = injectMcpToDir(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir)
   return { mcpOk, ruleOk }
 }

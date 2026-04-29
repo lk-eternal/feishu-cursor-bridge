@@ -140,7 +140,7 @@ function buildMetaBlock(meta?: LaunchMeta): string {
   const parts: string[] = []
   if (meta.chatId) parts.push(`[chat_id=${meta.chatId}]`)
   if (meta.chatType) parts.push(`[chat_type=${meta.chatType}]`)
-  return parts.length ? `\n\n---\n消息元数据:\n${parts.join("\n")}` : ""
+  return parts.length ? `\n\n---\n会话元数据:\n${parts.join("\n")}` : ""
 }
 
 function buildPrompt(meta?: LaunchMeta): string {
