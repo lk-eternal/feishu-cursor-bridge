@@ -1,5 +1,19 @@
 [
   {
+    "version": "3.2.0",
+    "date": "2026-04-30",
+    "changes": [
+      "重构: Agent 统一架构 — 合并 launchSessionAgent/launchIndependentAgent 为 launchAgent, 删除 independentAgents Map, 所有 Agent 统一由 sessionAgents 管理",
+      "新增: 临时长连接绑定 — Setup 引导流程无需完整启动 Daemon, 通过轻量 tempMain 模式完成飞书绑定",
+      "优化: Setup 引导精简 — 5 步缩减为 4 步, 合并 Daemon 启动与绑定步骤, 新增折叠式机器人配置提示",
+      "优化: 绑定类型统一为 chat_id — 移除 larkReceiveIdType 配置项, 简化消息路由逻辑",
+      "新增: Settings 新增「关于」Tab — 应用更新和 GitHub 仓库链接移入独立 Tab",
+      "修复: Setup 跳过后黑屏 — Settings 组件变量引用错误导致崩溃",
+      "修复: 每次启动重新进入引导 — onComplete 未持久化 setupComplete 到配置文件",
+      "优化: ui-logger 统一广播 — 合并 broadcastSessionStatus/broadcastIndependentTaskStatus, task 类型从 sessionData 中自动提取"
+    ]
+  },
+  {
     "version": "3.1.0",
     "date": "2026-04-29",
     "changes": [

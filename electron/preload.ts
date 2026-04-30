@@ -4,7 +4,6 @@ export interface AppConfig {
   larkAppId: string
   larkAppSecret: string
   larkReceiveId: string
-  larkReceiveIdType: "open_id" | "user_id" | "chat_id"
   workspaceDir: string
   enableGroupChat: boolean
   model: string
@@ -215,6 +214,9 @@ const api = {
     ipcRenderer.on("mcp:login-complete", handler)
     return () => ipcRenderer.removeListener("mcp:login-complete", handler)
   },
+  startTempConnection: (appId: string, appSecret: string): Promise<{ ok: boolean; openId?: string; chatId?: string; error?: string }> =>
+    ipcRenderer.invoke("temp-conn:start", appId, appSecret),
+  stopTempConnection: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("temp-conn:stop"),
   startBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:start"),
   testBind: (): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke("bind:test"),
   onBindResult: (cb: (data: { ok: boolean; value: string }) => void) => {

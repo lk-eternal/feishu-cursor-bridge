@@ -7,7 +7,6 @@ interface AppConfig {
   larkAppId: string
   larkAppSecret: string
   larkReceiveId: string
-  larkReceiveIdType: "open_id" | "user_id" | "chat_id"
   workspaceDir: string
   model: string
   autoStart: boolean

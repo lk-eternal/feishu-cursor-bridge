@@ -35,6 +35,7 @@ const RECEIVE_ID_TYPE = process.env.LARK_RECEIVE_ID_TYPE ?? "";
 const CONFIGURED_PORT = process.env.LARK_DAEMON_PORT ? Number(process.env.LARK_DAEMON_PORT) : 0;
 const WORKSPACE_DIR = process.env.LARK_WORKSPACE_DIR ?? process.cwd();
 const MESSAGE_PREFIX = process.env.LARK_MESSAGE_PREFIX ?? "";
+const TEMP_MODE = process.env.LARK_TEMP_MODE === "1";
 
 const savedProxyKeys = stripProxyEnv();
 
@@ -973,4 +974,28 @@ export async function daemonMain(): Promise<void> {
   );
 
   log("INFO", `Daemon 就绪 ✓ port=${daemonPort}`);
+}
+
+async function tempMain(): Promise<void> {
+  if (!APP_ID || !APP_SECRET) {
+    log("ERROR", "LARK_APP_ID / LARK_APP_SECRET 未配置");
+    process.exit(1);
+  }
+
+  log("INFO", "临时长连接模式启动（仅用于绑定）");
+
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+
+  startBind();
+
+  sender.startConnection(APP_ID, APP_SECRET, ENCRYPT_KEY, (ev) => {
+    tryCaptureBind(ev.chatType, ev.chatId, ev.senderOpenId);
+  });
+}
+
+if (TEMP_MODE) {
+  tempMain().catch((e) => { console.error(e); process.exit(1); });
+} else {
+  daemonMain().catch((e) => { console.error(e); process.exit(1); });
 }

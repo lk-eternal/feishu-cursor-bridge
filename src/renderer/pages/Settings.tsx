@@ -35,6 +35,8 @@ import {
   ExternalLink,
   Copy,
   RotateCcw,
+  Info,
+  Github,
 } from "lucide-react"
 import SearchableSelect from "../components/SearchableSelect"
 import WorkspaceDaemonModal from "../components/WorkspaceDaemonModal"
@@ -43,8 +45,7 @@ import useInlineModal from "../components/useInlineModal"
 
 interface Props { onBack: () => void; onResetSetup?: () => void; initialTab?: string; onTabConsumed?: () => void }
 
-type IdType = "open_id" | "user_id" | "chat_id"
-type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup"
+type Tab = "general" | "proxy" | "agent" | "mcp" | "rules" | "tasks" | "skills" | "setup" | "about"
 type CloseWindowAction = "ask" | "minimize" | "quit"
 
 interface McpEditForm {
@@ -77,6 +78,7 @@ const TABS: { id: Tab; label: string; icon: typeof SettingsIcon }[] = [
   { id: "skills", label: "Skills", icon: Sparkles },
   { id: "tasks", label: "定时任务", icon: Timer },
   { id: "setup", label: "帮助引导", icon: BookOpen },
+  { id: "about", label: "关于", icon: Info },
 ]
 
 export default function Settings({ onBack, onResetSetup, initialTab, onTabConsumed }: Props) {
@@ -92,7 +94,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   const [appId, setAppId] = useState("")
   const [appSecret, setAppSecret] = useState("")
   const [receiveId, setReceiveId] = useState("")
-  const [idType, setIdType] = useState<IdType>("open_id")
   const [workspaceDir, setWorkspaceDir] = useState("")
   const [enableGroupChat, setEnableGroupChat] = useState(false)
   const [digitalIdentity, setDigitalIdentity] = useState("")
@@ -253,7 +254,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
   useEffect(() => {
     if (tab === "general") window.electronAPI.getConfig().then((config) => {
       setAppId(config.larkAppId); setAppSecret(config.larkAppSecret)
-      setReceiveId(config.larkReceiveId); setIdType(config.larkReceiveIdType)
+      setReceiveId(config.larkReceiveId)
       setWorkspaceDir(config.workspaceDir); setEnableGroupChat(!!config.enableGroupChat)
       setModel(config.model)
       setProxy(config.httpProxy || config.httpsProxy || "")
@@ -279,7 +280,7 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
     saveTimer.current = setTimeout(async () => {
       const r = await window.electronAPI.saveConfig({
         larkAppId: appId.trim(), larkAppSecret: appSecret.trim(),
-        larkReceiveId: receiveId.trim(), larkReceiveIdType: "chat_id" as const,
+        larkReceiveId: receiveId.trim(),
         workspaceDir: workspaceDir.trim(), enableGroupChat,
         model,
         httpProxy: proxy.trim(), httpsProxy: proxy.trim(), noProxy: noProxy.trim(),
@@ -676,47 +677,6 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                 </div>
               </section>
               <section className="space-y-3">
-                <h3 className="text-sm font-medium text-gray-300">应用更新</h3>
-                <p className="text-xs text-gray-600">
-                  当前 <span className="font-mono text-gray-400">v{appVersion || "…"}</span>
-                  ，可检查是否有新版本。
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={updateBusy || updateDownloadPct !== null}
-                    onClick={() => void handleCheckUpdate()}
-                    className="inline-flex items-center gap-2 rounded-lg border border-gray-600 bg-gray-800/50 px-4 py-2 text-sm transition hover:border-blue-500 hover:bg-gray-800 disabled:opacity-50"
-                  >
-                    {updateBusy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
-                    检查更新
-                  </button>
-                  {updateCheck?.status === "available" && (
-                    <button
-                      type="button"
-                      disabled={updateBusy || updateDownloadPct !== null}
-                      onClick={() => void handleApplyUpdate()}
-                      className="inline-flex items-center gap-2 rounded-lg border border-blue-500 bg-blue-500/15 px-4 py-2 text-sm text-blue-200 transition hover:bg-blue-500/25 disabled:opacity-50"
-                    >
-                      立即更新
-                    </button>
-                  )}
-                </div>
-                {updateMsg && (
-                  <div className="space-y-2">
-                    <p className="whitespace-pre-wrap rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-400">{updateMsg}</p>
-                    {updateDownloadPct !== null && (
-                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
-                        <div
-                          className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
-                          style={{ width: `${updateDownloadPct}%` }}
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </section>
-              <section className="space-y-3">
                 <h3 className="text-sm font-medium text-gray-300">关闭主窗口</h3>
                 <p className="text-xs text-gray-600">点击窗口右上角关闭时的行为（可从系统托盘再次打开窗口）。</p>
                 <div className="space-y-2">
@@ -1106,6 +1066,64 @@ export default function Settings({ onBack, onResetSetup, initialTab, onTabConsum
                     <ExternalLink size={12} />项目 GitHub
                   </a>
                 </div>
+              </section>
+            </>)}
+
+            {tab === "about" && (<>
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">应用更新</h3>
+                <p className="text-xs text-gray-600">
+                  当前 <span className="font-mono text-gray-400">v{appVersion || "…"}</span>
+                  ，可检查是否有新版本。
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={updateBusy || updateDownloadPct !== null}
+                    onClick={() => void handleCheckUpdate()}
+                    className="inline-flex items-center gap-2 rounded-lg border border-gray-600 bg-gray-800/50 px-4 py-2 text-sm transition hover:border-blue-500 hover:bg-gray-800 disabled:opacity-50"
+                  >
+                    {updateBusy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
+                    检查更新
+                  </button>
+                  {updateCheck?.status === "available" && (
+                    <button
+                      type="button"
+                      disabled={updateBusy || updateDownloadPct !== null}
+                      onClick={() => void handleApplyUpdate()}
+                      className="inline-flex items-center gap-2 rounded-lg border border-blue-500 bg-blue-500/15 px-4 py-2 text-sm text-blue-200 transition hover:bg-blue-500/25 disabled:opacity-50"
+                    >
+                      立即更新
+                    </button>
+                  )}
+                </div>
+                {updateMsg && (
+                  <div className="space-y-2">
+                    <p className="whitespace-pre-wrap rounded-lg border border-gray-700 bg-gray-900/50 px-3 py-2 text-xs text-gray-400">{updateMsg}</p>
+                    {updateDownloadPct !== null && (
+                      <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-800">
+                        <div
+                          className="h-full rounded-full bg-blue-500 transition-[width] duration-300 ease-out"
+                          style={{ width: `${updateDownloadPct}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+
+              <section className="space-y-3">
+                <h3 className="text-sm font-medium text-gray-300">项目信息</h3>
+                <a
+                  href="https://github.com/lk-eternal/feishu-cursor-bridge"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-600 bg-gray-800/50 px-4 py-2 text-sm text-gray-300 transition hover:border-blue-500 hover:bg-gray-800 hover:text-blue-400"
+                >
+                  <Github size={16} />
+                  GitHub 仓库
+                  <ExternalLink size={12} className="text-gray-500" />
+                </a>
               </section>
             </>)}
 

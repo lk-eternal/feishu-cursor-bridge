@@ -1,6 +1,6 @@
 {
   "name": "feishu-cursor-bridge",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Feishu Cursor Bridge - 飞书 × Cursor 远程协作桌面应用",
   "keywords": [
     "mcp",

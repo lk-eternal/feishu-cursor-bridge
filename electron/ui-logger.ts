@@ -58,16 +58,16 @@ export function flushAgentStreamChunk(
 }
 
 export function broadcastSessionStatus(sessionData: { sessionKey: string; pid: number; startedAt: number; lastActivityAt: number; chatType: string; chatName?: string; workspaceDir?: string }[]): void {
+  const taskStatuses: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
+  for (const s of sessionData) {
+    if (s.chatType === "task") taskStatuses[s.sessionKey] = { running: true, pid: s.pid, startedAt: s.startedAt }
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send("agent:sessions", sessionData)
+    win.webContents.send("scheduled-tasks:status", taskStatuses)
   }
 }
 
-export function broadcastIndependentTaskStatus(statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }>): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send("scheduled-tasks:status", statuses)
-  }
-}
 
 export function logCursorAgentInvocation(logLabel: string, agentArgs: string[], cwd?: string): void {
   const cwdSuffix = cwd != null && cwd !== "" ? `${cwd} ` : ""

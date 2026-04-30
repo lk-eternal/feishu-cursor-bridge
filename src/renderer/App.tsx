@@ -70,7 +70,7 @@ export default function App() {
     return (
       <>
         <Setup
-          onComplete={() => { setWasSetupDone(true); setPage("dashboard") }}
+          onComplete={() => { void window.electronAPI.saveConfig({ setupComplete: true }); setWasSetupDone(true); setPage("dashboard") }}
           onExit={wasSetupDone ? () => {
             if (setupFrom === "settings") {
               setSettingsInitTab("setup")

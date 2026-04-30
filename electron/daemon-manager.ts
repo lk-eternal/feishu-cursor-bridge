@@ -1,32 +1,30 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import * as http from "node:http"
+import * as https from "node:https"
 import * as path from "node:path"
 import * as fs from "node:fs"
 import * as os from "node:os"
 import { app, BrowserWindow, ipcMain, powerSaveBlocker } from "electron"
 import { getConfig, saveConfig, type AppConfig, type ScheduledTask } from "./config-store"
 import { validateCron, readTasksFromFile, writeTasksToFile, previewCronNextRuns, getNextCronFireLabel } from "./cron-scheduler"
-import { pushLog, pushUiLog, broadcastLog as _broadcastLog, getLogBuffer as _getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine } from "./ui-logger"
+import { pushLog, pushUiLog, broadcastLog, getLogBuffer, clearLogBuffer, logCursorAgentInvocation, escapeLogContentSingleLine } from "./ui-logger"
+import { resolveAgentBinary, applyProxyEnv, quoteArg, getAgentPaths, execAgentSync } from "./agent-cli"
 import {
-  resolveAgentBinary as _resolveAgentBinary, applyProxyEnv as _applyProxyEnv,
-  quoteArg, getAgentPaths, checkCliInstalled as _checkCliInstalled,
-  installCli as _installCli, execAgentSync as _execAgentSync, execAgentAsync as _execAgentAsync,
-  type ExecAgentOptions,
-} from "./agent-cli"
-import {
-  stopAgent as _stopAgent,
-  launchSessionAgent as _launchSessionAgent, stopSessionAgent as _stopSessionAgent,
-  stopAllSessionAgents as _stopAllSessionAgents, getSessionAgentList as _getSessionAgentList,
-  launchIndependentAgent as _launchIndependentAgent, isAgentRunning as _isAgentRunning,
-  isSessionAgentRunning as _isSessionAgentRunning,
-  getRunningSessionCount as _getRunningSessionCount,
-  checkAgentLoggedIn as _checkAgentLoggedIn, loginCli as _loginCli,
-  reapIdleGroupAgents as _reapIdleGroupAgents,
-  getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses, getIndependentAgentList,
-  P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId as _getMainChatId,
-  setChatNameResolver as _setChatNameResolver,
+  launchSessionAgent as _launchSessionAgent, launchAgent as _launchAgent,
+  launchIndependentAgent,
+  stopAgent, stopSessionAgent, stopAllSessionAgents,
+  getSessionAgentList as getRawSessionAgentList,
+  isAgentRunning, isSessionAgentRunning, getRunningSessionCount,
+  getAgentChildPid, getSessionAgentCount, getIndependentTaskStatuses,
+  reapIdleGroupAgents, setChatNameResolver,
+  P2P_SESSION_KEY, makeMainP2pSessionKey, setMainChatId, getMainChatId,
+  type ChatType,
 } from "./agent-launcher"
+
+export { applyProxyEnv, checkCliInstalled, installCli, execAgentSync, execAgentAsync, type ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
+export { checkAgentLoggedIn, loginCli } from "./agent-launcher"
+export { getLogBuffer } from "./ui-logger"
 
 /** 与 daemon stderr 当前格式一致：`时间戳 [LarkDaemon] 等级 内容` */
 const UNIFIED_LARK_DAEMON_PREFIX = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d{3} \[LarkDaemon\] /
@@ -85,6 +83,8 @@ let cachedPort: number | null = null
 /** 本次由本应用启动成功时 Daemon 所绑定的工作目录（用于目录切换后的状态判断） */
 let activeDaemonWorkspaceDir: string | null = null
 
+let tempConnProcess: ChildProcess | null = null
+
 function getDaemonEntryPath(): string {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "daemon", "daemon-entry.mjs")
@@ -92,6 +92,56 @@ function getDaemonEntryPath(): string {
   const bundled = path.join(app.getAppPath(), "dist-bundle", "daemon-entry.mjs")
   if (fs.existsSync(bundled)) return bundled
   return path.join(app.getAppPath(), "dist", "daemon-entry.js")
+}
+
+function startTempConnection(appId: string, appSecret: string): Promise<{ openId: string; chatId: string }> {
+  stopTempConnection()
+  return new Promise((resolve, reject) => {
+    const entry = getDaemonEntryPath()
+    const env: Record<string, string> = {
+      ...process.env as Record<string, string>,
+      LARK_APP_ID: appId,
+      LARK_APP_SECRET: appSecret,
+      LARK_TEMP_MODE: "1",
+      LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", appId),
+    }
+    const child = spawn(process.execPath, [entry], { env, stdio: ["ignore", "pipe", "pipe"] })
+    tempConnProcess = child
+
+    let settled = false
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const lines = chunk.toString().split("\n")
+      for (const line of lines) {
+        if (line.startsWith("__BIND_RESULT__:")) {
+          const json = line.slice("__BIND_RESULT__:".length).trim()
+          try {
+            const result = JSON.parse(json)
+            settled = true
+            resolve(result)
+          } catch { /* ignore parse error */ }
+        }
+      }
+    })
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString().trim()
+      if (text) pushLog(`[TEMP_CONN] ${text}`)
+    })
+    child.on("exit", (code) => {
+      tempConnProcess = null
+      if (!settled) reject(new Error(`临时连接进程退出: code=${code}`))
+    })
+    child.on("error", (err) => {
+      tempConnProcess = null
+      if (!settled) reject(err)
+    })
+  })
+}
+
+function stopTempConnection(): void {
+  if (tempConnProcess) {
+    tempConnProcess.kill()
+    tempConnProcess = null
+  }
 }
 
 function getMcpServerPath(): string {
@@ -154,6 +204,43 @@ function httpGet(url: string, timeoutMs = 3000): Promise<DaemonStatus> {
   })
 }
 
+function httpsPost(url: string, body: object, headers: Record<string, string> = {}, timeoutMs = 5000): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body)
+    const req = https.request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data).toString(), ...headers },
+      timeout: timeoutMs,
+    }, (res) => {
+      const chunks: string[] = []
+      res.on("data", (c: Buffer) => chunks.push(c.toString()))
+      res.on("end", () => {
+        try { resolve(JSON.parse(chunks.join(""))) } catch { resolve(null) }
+      })
+    })
+    req.on("error", reject)
+    req.on("timeout", () => { req.destroy(); reject(new Error("timeout")) })
+    req.end(data)
+  })
+}
+
+async function larkSendTestMessage(receiveId: string): Promise<void> {
+  const cfg = getConfig()
+  if (!cfg.larkAppId || !cfg.larkAppSecret) throw new Error("飞书凭据未配置")
+  const tokenResp = await httpsPost("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+    app_id: cfg.larkAppId,
+    app_secret: cfg.larkAppSecret,
+  })
+  const token = tokenResp?.tenant_access_token
+  if (!token) throw new Error("获取 access_token 失败")
+  const sendResp = await httpsPost(
+    `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id`,
+    { receive_id: receiveId, msg_type: "text", content: JSON.stringify({ text: "🔗 绑定测试成功！连接正常。" }) },
+    { Authorization: `Bearer ${token}` },
+  )
+  if (sendResp?.code !== 0) throw new Error(sendResp?.msg || "发送失败")
+}
+
 function httpPost(url: string, body: object, timeoutMs = 3000): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body)
@@ -188,13 +275,13 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
       queueLength: health.queueLength as number,
       hasTarget: health.hasTarget as boolean,
       autoOpenId: health.autoOpenId as string | null,
-      agentRunning: _isAgentRunning() || getSessionAgentCount() > 0,
+      agentRunning: isAgentRunning() || getSessionAgentCount() > 0,
       agentPid: getAgentChildPid(),
-      sessionAgentCount: _getRunningSessionCount(),
+      sessionAgentCount: getRunningSessionCount(),
       model: cfgModel,
     }
     if (status.autoOpenId && !config.larkReceiveId) {
-      saveConfig({ larkReceiveId: status.autoOpenId, larkReceiveIdType: "open_id" })
+      saveConfig({ larkReceiveId: status.autoOpenId })
     }
     return status
   }
@@ -264,8 +351,6 @@ function ensureCliConfig(): void {
   } catch { /* ignore */ }
 }
 
-export const applyProxyEnv = _applyProxyEnv
-
 export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
   const config = getConfig()
   if (!config.larkAppId || !config.larkAppSecret) {
@@ -304,7 +389,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
       LARK_APP_ID: config.larkAppId,
       LARK_APP_SECRET: config.larkAppSecret,
       LARK_RECEIVE_ID: config.larkReceiveId,
-      LARK_RECEIVE_ID_TYPE: config.larkReceiveIdType,
+      LARK_RECEIVE_ID_TYPE: "chat_id",
       LARK_WORKSPACE_DIR: config.workspaceDir,
       LARK_APP_DATA_DIR: path.join(app.getPath("userData"), "apps", config.larkAppId),
       NODE_USE_ENV_PROXY: "1",
@@ -334,7 +419,11 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
         if (line.startsWith("__IND_LAUNCH__:")) {
           try {
             const payload = JSON.parse(line.slice("__IND_LAUNCH__:".length))
-            launchIndependentAgent(payload.taskId, payload.taskName, payload.content)
+            void _launchAgent({
+              sessionKey: payload.taskId, chatType: "task",
+              chatName: payload.taskName, taskMessage: payload.content,
+              meta: { chatId: payload.taskName, chatType: "task" },
+            })
           } catch { /* ignore malformed */ }
           continue
         }
@@ -343,7 +432,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
             const payload = JSON.parse(line.slice("__BIND_RESULT__:".length))
             const chatId = payload.chatId
             if (chatId) {
-              saveConfig({ larkReceiveId: chatId, larkReceiveIdType: "chat_id" })
+              saveConfig({ larkReceiveId: chatId })
               broadcastLog(`[Bind] 主用户绑定成功: chat_id=${chatId}`)
               BrowserWindow.getAllWindows().forEach((w) => w.webContents.send("bind:result", { ok: true, value: chatId }))
             }
@@ -384,7 +473,7 @@ export async function startDaemon(): Promise<{ ok: boolean; error?: string }> {
     cachedPort = lock.port
     activeDaemonWorkspaceDir = config.workspaceDir.trim() || null
     startStatusPolling()
-    injectWorkspaceMcpAndRules()
+    await injectWorkspaceMcpAndRules()
     return { ok: true }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)
@@ -448,8 +537,6 @@ function broadcastStatus(status: DaemonStatus): void {
     win.webContents.send("daemon:status-update", status)
   }
 }
-
-const broadcastLog = _broadcastLog
 
 const AGENT_STALE_TIMEOUT_MS = 10 * 60 * 1000
 let queueStaleStartTime: number | null = null
@@ -522,7 +609,7 @@ function startStatusPolling(): void {
       const status = await getDaemonStatus()
       broadcastStatus(status)
 
-      if (status.running && status.queueLength && status.queueLength > 0 && _isAgentRunning()) {
+      if (status.running && status.queueLength && status.queueLength > 0 && isAgentRunning()) {
         if (queueStaleStartTime === null) {
           queueStaleStartTime = Date.now()
         } else if (Date.now() - queueStaleStartTime > AGENT_STALE_TIMEOUT_MS) {
@@ -538,9 +625,9 @@ function startStatusPolling(): void {
         await dispatchSessionAgents()
       }
 
-      _reapIdleGroupAgents()
+      reapIdleGroupAgents()
 
-      const sessions = _getSessionAgentList()
+      const sessions = getRawSessionAgentList()
       const uncachedGroups = sessions
         .filter((s) => s.chatType === "group" && !chatNameCache.has(s.sessionKey))
         .map((s) => s.sessionKey)
@@ -657,7 +744,6 @@ function isMainUser(chatId?: string, chatType?: string): boolean {
 
 async function dispatchSessionAgents(): Promise<void> {
   const config = getConfig()
-  if (config.workspaceDir) injectMcpToDir(config.workspaceDir)
   const chats = await getQueueChats()
 
   const groupChatIds = chats.filter((c) => c.chatType === "group").map((c) => c.chatId)
@@ -669,7 +755,7 @@ async function dispatchSessionAgents(): Promise<void> {
       ? makeMainP2pSessionKey(chatId, config.workspaceDir)
       : chatId
 
-    if (_isSessionAgentRunning(sessionKey)) continue
+    if (isSessionAgentRunning(sessionKey)) continue
 
     if (chatType === "p2p" && senderOpenId && !chatNameCache.has(senderOpenId)) {
       await fetchUserNames([senderOpenId])
@@ -684,8 +770,10 @@ async function dispatchSessionAgents(): Promise<void> {
       : (mainUser ? `主用户私聊${userName ? ` (${userName})` : ""}` : `私聊 ${userName || chatId}`)
     broadcastLog(`[Agent] ${label} 有新消息，自动拉起${mainUser ? "(主工作目录)" : ""}`)
 
+    if (config.workspaceDir) await injectMcpToDir(config.workspaceDir)
+
     const meta: import("./agent-launcher").LaunchMeta = { chatId, chatType: chatType as "p2p" | "group" }
-    const result = launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)
+    const result = await launchSessionAgent(sessionKey, chatType as "p2p" | "group", undefined, meta, mainUser, senderOpenId)
     if (!result.ok) broadcastLog(`[Agent] ${sessionKey} 启动跳过: ${result.error}`)
   }
 }
@@ -737,13 +825,6 @@ export async function clearLogs(): Promise<void> {
 
 // ── CLI 检测与安装 ──────────────────────────────────────────
 
-export const checkCliInstalled = _checkCliInstalled
-export const installCli = _installCli
-
-export const loginCli = _loginCli
-
-export const getLogBuffer = _getLogBuffer
-
 // ── MCP 配置 + 规则注入 ────────────────────────────────────
 
 /**
@@ -761,7 +842,7 @@ function buildMcpServers(): Record<string, unknown> {
   }
 }
 
-function injectMcpToDir(wsDir: string): boolean {
+async function injectMcpToDir(wsDir: string): Promise<boolean> {
   try {
     const newServers = buildMcpServers()
     const hash = JSON.stringify(newServers)
@@ -782,7 +863,7 @@ function injectMcpToDir(wsDir: string): boolean {
     injectedMcpHashes.set(wsDir, hash)
     broadcastLog(`MCP 已注入: ${mcpPath}`)
 
-    enableMcpServersAsync(wsDir, Object.keys(newServers))
+    await enableMcpServers(wsDir, Object.keys(newServers))
     return true
   } catch (e: unknown) {
     broadcastLog(`MCP 注入失败: ${e instanceof Error ? e.message : e}`, "ERROR")
@@ -790,35 +871,34 @@ function injectMcpToDir(wsDir: string): boolean {
   }
 }
 
-function enableMcpServersAsync(wsDir: string, serverNames: string[]): void {
+async function enableMcpServers(wsDir: string, serverNames: string[]): Promise<void> {
   const config = getConfig()
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
-  ;(async () => {
-    let needEnable: string[]
+
+  let needEnable: string[]
+  try {
+    const r = await spawnAsync(["mcp", "list"], wsDir, env)
+    const clean = r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
+    const enabledSet = new Set<string>()
+    for (const line of clean.split("\n")) {
+      const m = line.match(/^(.+?):\s+(.+)$/)
+      if (m && isEnabledStatus(m[2].trim())) enabledSet.add(m[1].trim())
+    }
+    needEnable = serverNames.filter((n) => !enabledSet.has(n))
+    if (needEnable.length === 0) return
+  } catch {
+    needEnable = serverNames
+  }
+  for (const name of needEnable) {
     try {
-      const r = await spawnAsync(["mcp", "list"], wsDir, env)
-      const clean = r.stdout.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").replace(/\r/g, "")
-      const enabledSet = new Set<string>()
-      for (const line of clean.split("\n")) {
-        const m = line.match(/^(.+?):\s+(.+)$/)
-        if (m && isEnabledStatus(m[2].trim())) enabledSet.add(m[1].trim())
-      }
-      needEnable = serverNames.filter((n) => !enabledSet.has(n))
-      if (needEnable.length === 0) return
-    } catch {
-      needEnable = serverNames
+      const r = await spawnAsync(["mcp", "enable", name], wsDir, env)
+      const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
+      broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
+    } catch (e: unknown) {
+      broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
     }
-    for (const name of needEnable) {
-      try {
-        const r = await spawnAsync(["mcp", "enable", name], wsDir, env)
-        const out = (r.stdout + r.stderr).replace(/\x1b\[[0-9;]*m/g, "").trim()
-        broadcastLog(`[MCP Auto-Enable] "${name}": ${out || "已启用"}`, r.code === 0 ? "INFO" : "WARN")
-      } catch (e: unknown) {
-        broadcastLog(`[MCP Auto-Enable] "${name}" 失败: ${e instanceof Error ? e.message : e}`, "WARN")
-      }
-    }
-  })()
+  }
 }
 
 function injectRulesToDir(wsDir: string): boolean {
@@ -860,26 +940,20 @@ function injectRulesToDir(wsDir: string): boolean {
   }
 }
 
-export function injectWorkspaceMcpAndRules(): { mcpOk: boolean; ruleOk: boolean } {
+export async function injectWorkspaceMcpAndRules(): Promise<{ mcpOk: boolean; ruleOk: boolean }> {
   const config = getConfig()
   if (!config.workspaceDir) return { mcpOk: false, ruleOk: false }
-  const mcpOk = injectMcpToDir(config.workspaceDir)
+  const mcpOk = await injectMcpToDir(config.workspaceDir)
   const ruleOk = injectRulesToDir(config.workspaceDir)
   return { mcpOk, ruleOk }
 }
 
-function injectWorkspaceToDir(dir: string): boolean {
-  injectMcpToDir(dir)
+async function injectWorkspaceToDir(dir: string): Promise<boolean> {
+  await injectMcpToDir(dir)
   return injectRulesToDir(dir)
 }
 
 // ── Agent 状态与会话管理（委托 agent-launcher） ─────────────
-
-export const launchIndependentAgent = _launchIndependentAgent
-
-export type { ExecAgentOptions as ExecAgentSyncOptions } from "./agent-cli"
-export const execAgentSync = _execAgentSync
-export const execAgentAsync = _execAgentAsync
 
 export type AgentLoginStatus = {
   cliFound: boolean
@@ -888,21 +962,24 @@ export type AgentLoginStatus = {
   error?: string
 }
 
-export const checkAgentLoggedIn = _checkAgentLoggedIn
-export const stopAgent = _stopAgent
 export const launchAgent = () =>
   launchSessionAgent(P2P_SESSION_KEY, "p2p", undefined, undefined, true)
-export const launchSessionAgent: (sessionKey: string, chatType: "p2p" | "group", injectWorkspaceFn?: (dir: string) => boolean, meta?: import("./agent-launcher").LaunchMeta, useMainWorkspace?: boolean, senderOpenId?: string) => { ok: boolean; error?: string } =
-  (sessionKey, chatType, _injectFn, meta, useMainWorkspace, senderOpenId) => _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
-export const stopSessionAgent = _stopSessionAgent
-export const stopAllSessionAgents = _stopAllSessionAgents
+
+export function launchSessionAgent(
+  sessionKey: string, chatType: ChatType,
+  _injectFn?: (dir: string) => boolean | Promise<boolean>,
+  meta?: import("./agent-launcher").LaunchMeta,
+  useMainWorkspace?: boolean, senderOpenId?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return _launchSessionAgent(sessionKey, chatType, injectWorkspaceToDir, meta, useMainWorkspace, senderOpenId)
+}
+
 export function getSessionAgentList() {
-  const sessions = _getSessionAgentList().map((s) => {
+  return getRawSessionAgentList().map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
-    const chatName = chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
+    const chatName = s.chatName || chatNameCache.get(chatId) || (s.senderOpenId ? chatNameCache.get(s.senderOpenId) : undefined)
     return { ...s, chatName }
   })
-  return [...sessions, ...getIndependentAgentList()]
 }
 
 // ── 指令执行（从共享文件队列消费）──────────────────────────
@@ -1261,7 +1338,7 @@ async function handleFeishuTaskCommand(port: number, messageId: string, raw: str
     const nowStr = new Date().toLocaleString("zh-CN")
     const content = `[定时任务: ${t.name}] (手动触发: ${nowStr})\n\n${t.content}`
     if (t.independent !== false) {
-      const result = launchIndependentAgent(t.id, t.name, content)
+      const result = await launchIndependentAgent(t.id, t.name, content)
       if (result.ok) {
         await reportCommandResult(port, messageId, true, `🚀 已独立启动任务 #${idx} ${t.name}`)
       } else {
@@ -1561,11 +1638,11 @@ async function checkAndExecutePendingCommands(): Promise<void> {
       switch (head) {
         case "/stop": {
           if (isAdmin) {
-            const wasRunning = _isAgentRunning()
+            const wasRunning = isAgentRunning()
             stopAgent()
             await reply(true, wasRunning ? "✅ Agent 已停止" : "❌ Agent 当前未运行")
-          } else if (claimed.chatId && _isSessionAgentRunning(claimed.chatId)) {
-            _stopSessionAgent(claimed.chatId)
+          } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
+            stopSessionAgent(claimed.chatId)
             await reply(true, "✅ 当前会话 Agent 已停止")
           } else {
             await reply(false, "❌ 当前会话无运行中的 Agent")
@@ -1582,7 +1659,7 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             `🛡️ Daemon: ${status.running ? "✅ 运行中" : "❌ 未运行"}`,
             status.version ? `🔄 版本: ${status.version}` : "",
             status.uptime !== undefined ? `⌛️ 运行时间: ${Math.floor(status.uptime / 60)}分钟` : "",
-            `🤖 Agent: ${_isAgentRunning() ? `✅ 运行中 (PID: ${getAgentChildPid()})` : "❌ 未运行"}`,
+            `🤖 Agent: ${isAgentRunning() ? `✅ 运行中 (PID: ${getAgentChildPid()})` : "❌ 未运行"}`,
             `📭 队列消息: ${status.queueLength ?? 0} 条`,
             `⏰ 定时任务: 开启 ${schedEnabled} / 共 ${schedTotal} 条`,
           ].filter(Boolean)
@@ -1615,8 +1692,13 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             await reply(false, "💡 用法：/run <任务描述>\n例如：/run 帮我检查一下服务器状态")
             break
           }
-          const taskId = `temp-${Date.now()}`
-          const result = _launchIndependentAgent(taskId, "临时会话", runMsg)
+          const taskId = `temp_${Date.now()}`
+          const config = getConfig()
+          const result = await _launchAgent({
+            sessionKey: taskId, chatType: "temp_chat",
+            chatName: "临时会话", taskMessage: runMsg,
+            meta: { chatId: config.larkReceiveId, chatType: "temp_chat" },
+          })
           await reply(result.ok, result.ok
             ? `🚀 临时 Agent 已启动 (id=${taskId})`
             : `❌ 启动失败: ${result.error ?? "未知错误"}`)
@@ -1661,8 +1743,8 @@ async function checkAndExecutePendingCommands(): Promise<void> {
             setMainChatId(getConfig().workspaceDir, "")
             broadcastLog("[指令 /reset] 已清除主会话并停止 Agent，下次启动将创建新会话", "INFO")
             await reply(true, "✅ 已停止并重置当前会话, 请重新发消息开启新会话")
-          } else if (claimed.chatId && _isSessionAgentRunning(claimed.chatId)) {
-            _stopSessionAgent(claimed.chatId)
+          } else if (claimed.chatId && isSessionAgentRunning(claimed.chatId)) {
+            stopSessionAgent(claimed.chatId)
             await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
           } else {
             await reply(true, "✅ 当前会话已重置, 请重新发消息开启新会话")
@@ -1851,7 +1933,7 @@ async function fetchMcpList(force = false): Promise<McpListCache> {
   const config = getConfig()
   const ws = (config.workspaceDir || "").trim()
   const empty: McpListCache = { enabled: {}, status: {}, ts: 0, ws }
-  if (!ws || !_resolveAgentBinary()) return empty
+  if (!ws || !resolveAgentBinary()) return empty
   if (!force && mcpListCache && mcpListCache.ws === ws && Date.now() - mcpListCache.ts < MCP_ENABLED_CACHE_TTL_MS) return mcpListCache
   if (mcpListInflight) return mcpListInflight
 
@@ -1899,7 +1981,7 @@ export function invalidateMcpEnabledCache(): void {
 export async function toggleMcpServer(serverName: string, enabled: boolean): Promise<{ ok: boolean; output: string }> {
   const config = getConfig()
   if (!config.workspaceDir) return { ok: false, output: "工作目录未配置" }
-  if (!_resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
+  if (!resolveAgentBinary()) return { ok: false, output: "Cursor CLI 未安装" }
 
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
@@ -2035,7 +2117,7 @@ export function loginMcpServer(serverName: string): Promise<{ ok: boolean; outpu
       return
     }
 
-    if (!_resolveAgentBinary()) {
+    if (!resolveAgentBinary()) {
       resolve({ ok: false, output: "Cursor CLI 未安装" })
       return
     }
@@ -2162,7 +2244,7 @@ export async function applyWorkspaceDirChange(workspaceDir: string): Promise<{ o
 
   saveConfig({ workspaceDir: w })
   invalidateMcpEnabledCache()
-  injectWorkspaceMcpAndRules()
+  await injectWorkspaceMcpAndRules()
   broadcastStatus(await getDaemonStatus())
   return { ok: true }
 }
@@ -2228,7 +2310,7 @@ export async function saveAppConfigFromRenderer(partial: Partial<AppConfig>): Pr
 // ── 初始化 ───────────────────────────────────────────────
 
 export function initDaemonManager(): void {
-  _setChatNameResolver((chatId) => chatNameCache.get(chatId))
+  setChatNameResolver((chatId) => chatNameCache.get(chatId))
   ipcMain.handle("config:apply-workspace-restart", (_, workspaceDir: string) => applyWorkspaceDirRestart(workspaceDir))
   ipcMain.handle("daemon:get-log-buffer", () => getLogBuffer())
   ipcMain.handle("agent:launch", () => launchAgent())
@@ -2247,10 +2329,8 @@ export function initDaemonManager(): void {
   ipcMain.handle("bind:test", async () => {
     const chatId = getConfig().larkReceiveId?.trim()
     if (!chatId) return { ok: false, error: "未绑定主用户" }
-    const lock = readLockFile()
-    if (!lock) return { ok: false, error: "Daemon 未运行" }
     try {
-      await httpPost(`http://127.0.0.1:${lock.port}/test-bind`, { chatId })
+      await larkSendTestMessage(chatId)
       return { ok: true }
     } catch (e: any) {
       return { ok: false, error: e?.message ?? "发送失败" }
@@ -2259,11 +2339,17 @@ export function initDaemonManager(): void {
   ipcMain.handle("agent:stop-session", (_e, sessionKey: string) => { stopSessionAgent(sessionKey); return { ok: true } })
   ipcMain.handle("agent:stop-all-sessions", () => { stopAllSessionAgents(); return { ok: true } })
 
-  ipcMain.handle("scheduled-tasks:get", () => {
-    const tasks = readTasksFromFile()
-    console.log("[IPC] scheduled-tasks:get returned", tasks.length, "tasks")
-    return tasks
+  ipcMain.handle("temp-conn:start", async (_e, appId: string, appSecret: string) => {
+    try {
+      const result = await startTempConnection(appId, appSecret)
+      return { ok: true, ...result }
+    } catch (err: any) {
+      return { ok: false, error: err?.message ?? String(err) }
+    }
   })
+  ipcMain.handle("temp-conn:stop", () => { stopTempConnection(); return { ok: true } })
+
+  ipcMain.handle("scheduled-tasks:get", () => readTasksFromFile())
   ipcMain.handle("scheduled-tasks:save", (_, tasks) => {
     writeTasksToFile(tasks)
     return { ok: true }
@@ -2438,7 +2524,7 @@ async function queryToolsViaHttp(url: string, headers?: Record<string, string>):
 
 function queryToolsViaCli(serverName: string): Promise<{ ok: boolean; tools: McpToolInfo[]; error?: string }> {
   const config = getConfig()
-  if (!config.workspaceDir || !_resolveAgentBinary()) return Promise.resolve({ ok: false, tools: [], error: "CLI 不可用" })
+  if (!config.workspaceDir || !resolveAgentBinary()) return Promise.resolve({ ok: false, tools: [], error: "CLI 不可用" })
   const env: Record<string, string> = { ...process.env as Record<string, string> }
   applyProxyEnv(env, config)
   return spawnAsync(["mcp", "list-tools", serverName], config.workspaceDir, env).then((r) => {

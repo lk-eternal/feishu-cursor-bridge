@@ -11,7 +11,6 @@ import {
 import {
   broadcastLog, pushUiLog, flushAgentStreamChunk, logCursorAgentInvocation,
   broadcastSessionStatus as broadcastSessionStatusToUi,
-  broadcastIndependentTaskStatus as broadcastIndependentStatusToUi,
 } from "./ui-logger"
 
 export const P2P_SESSION_KEY = "__p2p__"
@@ -23,15 +22,18 @@ const AGENT_NO_PREVIOUS_CHATS = /no previous chats found/i
 
 // ── 会话 Agent ──────────────────────────────────────────
 
+export type ChatType = "p2p" | "group" | "task" | "temp_chat"
+
 interface SessionAgent {
   sessionKey: string
   child: ChildProcess
   pid: number
   startedAt: number
   lastActivityAt: number
-  chatType: "p2p" | "group"
+  chatType: ChatType
   workspaceDir?: string
   senderOpenId?: string
+  chatName?: string
 }
 
 const sessionAgents = new Map<string, SessionAgent>()
@@ -43,41 +45,16 @@ export function setChatNameResolver(fn: (chatId: string) => string | undefined):
 }
 
 function broadcastSessionStatus(): void {
-  const sessions = [...sessionAgents.values()].map((s) => {
+  const list = [...sessionAgents.values()].map((s) => {
     const chatId = s.sessionKey.includes("::") ? s.sessionKey.split("::")[0] : s.sessionKey
     return {
       sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
       lastActivityAt: s.lastActivityAt, chatType: s.chatType as string,
-      chatName: chatNameResolver?.(chatId) || (s.senderOpenId && chatNameResolver?.(s.senderOpenId)),
+      chatName: s.chatName || chatNameResolver?.(chatId) || (s.senderOpenId && chatNameResolver?.(s.senderOpenId)),
       workspaceDir: s.workspaceDir,
     }
   })
-  const tasks = [...independentAgents.values()].map((a) => ({
-    sessionKey: `task::${a.taskId}`, pid: a.pid, startedAt: a.startedAt,
-    lastActivityAt: a.startedAt, chatType: "task" as string,
-    chatName: a.taskName,
-  }))
-  broadcastSessionStatusToUi([...sessions, ...tasks])
-}
-
-// ── 独立任务 Agent ──────────────────────────────────────
-
-interface IndependentAgent {
-  taskId: string
-  taskName: string
-  pid: number
-  child: ChildProcess
-  startedAt: number
-}
-
-const independentAgents = new Map<string, IndependentAgent>()
-
-function broadcastIndependentTaskStatus(): void {
-  const statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
-  for (const [taskId, agent] of independentAgents) {
-    statuses[taskId] = { running: true, pid: agent.pid, startedAt: agent.startedAt }
-  }
-  broadcastIndependentStatusToUi(statuses)
+  broadcastSessionStatusToUi(list)
 }
 
 // ── 状态查询 ──────────────────────────────────────────
@@ -104,6 +81,7 @@ export function getSessionAgentList() {
     sessionKey: s.sessionKey, pid: s.pid, startedAt: s.startedAt,
     chatType: s.chatType, lastActivityAt: s.lastActivityAt,
     workspaceDir: s.workspaceDir, senderOpenId: s.senderOpenId,
+    chatName: s.chatName,
   }))
 }
 
@@ -118,40 +96,39 @@ export function getSessionAgentCount(): number {
 
 export function getIndependentTaskStatuses(): Record<string, { running: boolean; pid?: number; startedAt?: number }> {
   const statuses: Record<string, { running: boolean; pid?: number; startedAt?: number }> = {}
-  for (const [taskId, agent] of independentAgents) {
-    statuses[taskId] = { running: true, pid: agent.pid, startedAt: agent.startedAt }
+  for (const [key, agent] of sessionAgents) {
+    if (agent.chatType === "task") {
+      statuses[key] = { running: true, pid: agent.pid, startedAt: agent.startedAt }
+    }
   }
   return statuses
-}
-
-export function getIndependentAgentList() {
-  return [...independentAgents.values()].map((a) => ({
-    sessionKey: `task::${a.taskId}`, pid: a.pid, startedAt: a.startedAt,
-    lastActivityAt: a.startedAt, chatType: "task" as string, chatName: a.taskName,
-  }))
 }
 
 // ── Prompt 构建 ──────────────────────────────────────────
 
 export interface LaunchMeta { messageIds?: string[]; chatId?: string; chatType?: string }
 
-function buildMetaBlock(meta?: LaunchMeta): string {
-  if (!meta) return ""
-  const parts: string[] = []
-  if (meta.chatId) parts.push(`[chat_id=${meta.chatId}]`)
-  if (meta.chatType) parts.push(`[chat_type=${meta.chatType}]`)
-  return parts.length ? `\n\n---\n会话元数据:\n${parts.join("\n")}` : ""
-}
+function buildPrompt(meta?: LaunchMeta, taskMessage?: string): string {
+  const prompts: string[] = []
+  prompts.push("请按照digital-identity数字身份定义并遵守飞书工作流规则feishu-cursor-bridge开始工作")
 
-function buildPrompt(meta?: LaunchMeta): string {
-  const ruleRef = "请按照digital-identity数字身份定义并遵守飞书工作流规则feishu-cursor-bridge开始工作"
-  const metaBlock = buildMetaBlock(meta)
-  return [
-    ruleRef,
-    "如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。",
-    "否则，请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。",
-    metaBlock,
-  ].join("\n")
+  if(meta?.chatType === "p2p" || meta?.chatType === "group"){
+    prompts.push("如果你当前正在执行任务（上下文中已有进行中的工作），请直接继续，不要重复处理已完成的内容。")
+    prompts.push("否则，请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。")
+  }
+  if(meta?.chatType === "temp_chat"){
+    prompts.push("请立即通过 sync_message 工具获取待处理的飞书消息并开始工作。")
+  }
+  if(meta?.chatType === "task" && taskMessage){
+    prompts.push("[定时任务]")
+    prompts.push(taskMessage)
+  }
+
+  prompts.push("\n\n---\n会话元数据:\n")
+  prompts.push(`[chat_id=${meta?.chatId}]`)
+  prompts.push(`[chat_type=${meta?.chatType}]`)
+
+  return prompts.join("\n")
 }
 
 // ── 进程管理工具 ─────────────────────────────────────────
@@ -237,14 +214,33 @@ function attachStreamLoggers(child: ChildProcess): void {
 
 // ── 公开 API ────────────────────────────────────────
 
-export function launchSessionAgent(
+export interface LaunchAgentOptions {
+  sessionKey: string
+  chatType: ChatType
+  injectWorkspaceFn?: (dir: string) => boolean | Promise<boolean>
+  meta?: LaunchMeta
+  useMainWorkspace?: boolean
+  senderOpenId?: string
+  chatName?: string
+  taskMessage?: string
+}
+
+export async function launchSessionAgent(
   sessionKey: string,
   chatType: "p2p" | "group",
-  injectWorkspaceFn?: (dir: string) => boolean,
+  injectWorkspaceFn?: (dir: string) => boolean | Promise<boolean>,
   meta?: LaunchMeta,
   useMainWorkspace?: boolean,
   senderOpenId?: string,
-): { ok: boolean; error?: string } {
+): Promise<{ ok: boolean; error?: string }> {
+  return launchAgent({ sessionKey, chatType, injectWorkspaceFn, meta, useMainWorkspace, senderOpenId })
+}
+
+export async function launchAgent(opts: LaunchAgentOptions): Promise<{ ok: boolean; error?: string }> {
+  const { sessionKey, chatType, injectWorkspaceFn, meta, senderOpenId, chatName, taskMessage } = opts
+  const needResume = chatType === "p2p" || chatType === "group"
+  const useMainWorkspace = opts.useMainWorkspace ?? (chatType === "task" || chatType === "temp_chat")
+
   if (isSessionAgentRunning(sessionKey)) {
     sessionAgents.get(sessionKey)!.lastActivityAt = Date.now()
     return { ok: true }
@@ -262,22 +258,24 @@ export function launchSessionAgent(
       fs.mkdirSync(workDir, { recursive: true })
       broadcastLog(`[Agent] 创建临时工作目录: ${workDir}`)
     }
-    if (injectWorkspaceFn) injectWorkspaceFn(workDir)
+    if (injectWorkspaceFn) await injectWorkspaceFn(workDir)
   }
 
   if (!workDir) return { ok: false, error: "工作目录未配置" }
   if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
 
-  const prompt = buildPrompt(meta)
+  const prompt = buildPrompt(meta, taskMessage)
   const spawnEnv = makeSpawnEnv(config, { LARK_WORKSPACE_DIR: workDir })
   const overrideConfig = { ...config, workspaceDir: workDir }
 
   let resumeChatId: string | false = false
-  if (config.agentNewSession) {
-    if (getMainChatId(overrideConfig)) setMainChatId(workDir, "")
-  } else {
-    const cid = ensureMainChatId(overrideConfig, spawnEnv)
-    if (cid) resumeChatId = cid
+  if (needResume) {
+    if (config.agentNewSession) {
+      if (getMainChatId(overrideConfig)) setMainChatId(workDir, "")
+    } else {
+      const cid = ensureMainChatId(overrideConfig, spawnEnv)
+      if (cid) resumeChatId = cid
+    }
   }
 
   const args = buildAgentLaunchArgs(overrideConfig, prompt, resumeChatId)
@@ -298,7 +296,10 @@ export function launchSessionAgent(
       broadcastSessionStatus()
     })
 
-    sessionAgents.set(sessionKey, { sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(), chatType, workspaceDir: workDir, senderOpenId })
+    sessionAgents.set(sessionKey, {
+      sessionKey, child, pid: child.pid!, startedAt: Date.now(), lastActivityAt: Date.now(),
+      chatType, workspaceDir: workDir, senderOpenId, chatName,
+    })
     broadcastLog(`[Agent] 会话 ${sessionKey} (${chatType}) 已启动, pid=${child.pid}`)
     broadcastSessionStatus()
     return { ok: true }
@@ -336,56 +337,19 @@ export function reapIdleGroupAgents(): void {
   }
 }
 
-// ── 独立任务 Agent ──────────────────────────────────────
-
-export function launchIndependentAgent(taskId: string, taskName: string, message: string): { ok: boolean; error?: string } {
-  const existing = independentAgents.get(taskId)
-  if (existing && !existing.child.killed && existing.child.exitCode === null) {
-    broadcastLog(`[独立任务] ${taskName} 上次运行仍在进行中, pid=${existing.pid}，跳过`)
-    return { ok: false, error: "上次运行仍在进行中" }
-  }
-
-  const config = getConfig()
-  if (!config.workspaceDir) return { ok: false, error: "工作目录未配置" }
-  if (!resolveAgentBinary()) return { ok: false, error: "Cursor CLI 未安装" }
-
-  const prompt = `请执行该定时任务,并通过飞书告知用户结果,执行完成后结束会话：\n\n${message}`
-  const args = buildAgentLaunchArgs(config, prompt, false)
-  const spawnEnv = makeSpawnEnv(config)
-
-  try {
-    const ws = config.workspaceDir?.trim() || undefined
-    const child = spawnAgentWithLogs(args, spawnEnv, "launch-independent", ws)
-    attachStreamLoggers(child)
-
-    child.on("close", (code, signal) => {
-      pushUiLog("IndAgent", "INFO", `[${taskName}] 退出 code=${code}${signal ? ` signal=${signal}` : ""}`)
-      independentAgents.delete(taskId)
-      broadcastIndependentTaskStatus()
-    })
-    child.on("error", (e) => {
-      pushUiLog("IndAgent", "ERROR", `[${taskName}] 进程错误: ${e.message}`)
-      independentAgents.delete(taskId)
-      broadcastIndependentTaskStatus()
-    })
-
-    independentAgents.set(taskId, { taskId, taskName, pid: child.pid!, child, startedAt: Date.now() })
-    broadcastLog(`[独立任务] ${taskName} 已启动, pid=${child.pid}`)
-    broadcastIndependentTaskStatus()
-    return { ok: true }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e)
-    broadcastLog(`[独立任务] ${taskName} 启动失败: ${msg}`, "ERROR")
-    return { ok: false, error: msg }
-  }
+export async function launchIndependentAgent(taskId: string, taskName: string, message: string): Promise<{ ok: boolean; error?: string }> {
+  return launchAgent({
+    sessionKey: taskId,
+    chatType: "task",
+    chatName: taskName,
+    taskMessage: message,
+    meta: { chatId: taskName, chatType: "task" },
+  })
 }
 
 // ── CLI 登录 ────────────────────────────────────────
 
 export async function checkAgentLoggedIn(): Promise<{ cliFound: boolean; loggedIn: boolean; identityLine?: string; error?: string }> {
-  if (isAgentRunning()) {
-    return { cliFound: true, loggedIn: true, identityLine: "Agent 运行中（已跳过 whoami）" }
-  }
   if (!(await ensureAgentBinary())) {
     return { cliFound: false, loggedIn: false, error: "未找到 Cursor CLI（agent）" }
   }
