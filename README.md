@@ -1,3 +1,8 @@
+# 项目迁移啦
+后续迭代请参考:
+[cursor-claw](https://github.com/lk-eternal/cursor-claw)
+
+
 # Feishu Cursor Bridge
 
 飞书 × Cursor 远程协作应用 —— 将 Cursor 变成 7×24 小时在线的数字雇员，通过飞书随时随地与 AI 协作。
