@@ -1,0 +1,83 @@
+name: Migrate to Cursor Claw
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'cursor-claw release tag to pull artifacts from'
+        required: true
+        default: 'v1.0.0'
+      target_version:
+        description: 'Version number for the feishu-cursor-bridge release'
+        required: true
+        default: '4.0.0'
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: changelog.json
+          sparse-checkout-cone-mode: false
+
+      - name: Download cursor-claw release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p assets
+          gh release download "${{ inputs.source_tag }}" \
+            --repo lk-eternal/cursor-claw \
+            --dir assets \
+            --pattern '*.exe' \
+            --pattern '*.dmg' \
+            --pattern '*.AppImage' \
+            --pattern '*.deb' \
+            --pattern '*.yml' \
+            --pattern '*.blockmap'
+          echo "Downloaded assets:"
+          ls -la assets/
+
+      - name: Patch version in latest*.yml
+        run: |
+          TARGET="${{ inputs.target_version }}"
+          for f in assets/latest*.yml; do
+            [ -f "$f" ] || continue
+            sed -i "s/^version: .*/version: $TARGET/" "$f"
+            echo "=== $f ==="
+            head -5 "$f"
+          done
+
+      - name: Extract release notes
+        id: notes
+        run: |
+          VERSION="${{ inputs.target_version }}"
+          BODY=$(python3 -c "
+          import json, sys
+          with open('changelog.json') as f:
+              entries = json.load(f)
+          for e in entries:
+              if e['version'] == '$VERSION':
+                  print('\n'.join(e.get('changes', [])))
+                  sys.exit(0)
+          print('v$VERSION')
+          ")
+          {
+            echo 'body<<RELEASE_EOF'
+            echo "$BODY"
+            echo 'RELEASE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create migration release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t FILES < <(find assets -type f | sort)
+          gh release create "v${{ inputs.target_version }}" \
+            --title "v${{ inputs.target_version }} - 迁移至 Cursor Claw" \
+            --notes "${{ steps.notes.outputs.body }}" \
+            "${FILES[@]}"
