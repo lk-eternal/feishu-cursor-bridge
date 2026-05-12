@@ -1,5 +1,14 @@
 [
   {
+    "version": "4.0.0",
+    "date": "2026-05-12",
+    "changes": [
+      "⚠️ 项目迁移通知: 本项目已迁移至全新项目 Cursor Claw",
+      "新项目支持飞书 + 微信双通道，架构全面升级",
+      "请前往新项目获取后续更新: https://github.com/lk-eternal/cursor-claw/releases"
+    ]
+  },
+  {
     "version": "3.2.0",
     "date": "2026-04-30",
     "changes": [
